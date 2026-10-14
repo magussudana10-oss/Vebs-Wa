@@ -1,9 +1,9 @@
 {
   "name": "vebs-whatsapp-bot",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "private": true,
   "type": "module",
-  "description": "VEBS personal AI assistant for Magus Sudana, RM Jawa Timur 5, with persistent conversation context and Excel repayment analysis",
+  "description": "VEBS WhatsApp AI Agent for RM Jawa Timur 5 with scope-aware Excel repayment analysis, persistent memory, KPI diagnosis, and Gemini fallback",
   "engines": {
     "node": ">=20"
   },

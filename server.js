@@ -131,7 +131,7 @@ app.get("/status", (_req, res) => {
     primaryGeminiModel: GEMINI_MODEL,
     fallbackGeminiModels: getGeminiModels().filter(model => model !== GEMINI_MODEL),
     groupTrigger: "vebs (case-insensitive)",
-    excelAnalysis: "xlsx/xls/csv attachment; whole file, no area filter",
+    excelAnalysis: "xlsx/xls/csv attachment; scope follows requested area/branch when identifiable",
     kpiTargets: { current: 0.98, dpd1_30: 0.55, dpd31_60: 0.15, dpd61_90: 0.07 },
     incomingUpsertEvents: incomingEventCount,
     acceptedMessages: acceptedMessageCount,
@@ -351,7 +351,36 @@ function getExcelDate(value) {
   return date.toLocaleDateString("id-ID", { day: "2-digit", month: "short", year: "numeric", timeZone: "Asia/Jakarta" });
 }
 
-function parseRepaymentWorkbook(buffer, fileName) {
+function normalizeScopeText(value) {
+  return String(value ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+function resolveRequestedScope(rows, requestText) {
+  const request = normalizeScopeText(requestText);
+  if (!request) return { type: "all", value: "" };
+  // Filter only when the request explicitly asks for a single area/branch/point.
+  const asksScope = /\b(area|wilayah|branch|cabang|point|poin|titik)\b/.test(request) ||
+    /\b(saja|only|khusus|hanya)\b/.test(request);
+  if (!asksScope) return { type: "all", value: "" };
+
+  const areaValues = [...new Set(rows.map(row => String(row.area_name ?? "").trim()).filter(Boolean))]
+    .sort((a, b) => b.length - a.length);
+  const branchValues = [...new Set(rows.map(row => String(row.branch_name ?? row.point_name ?? "").trim()).filter(Boolean))]
+    .sort((a, b) => b.length - a.length);
+  const findMention = (values) => values.find(value => {
+    const normalized = normalizeScopeText(value);
+    if (!normalized || normalized.length < 2) return false;
+    return (` ${request} `).includes(` ${normalized} `);
+  });
+  const area = findMention(areaValues);
+  if (area) return { type: "area", value: area };
+  const branch = findMention(branchValues);
+  if (branch) return { type: "branch", value: branch };
+  return { type: "not_found", value: "" };
+}
+
+function parseRepaymentWorkbook(buffer, fileName, requestText = "") {
   const workbook = XLSX.read(buffer, { type: "buffer", cellDates: true });
   let rows = [];
   let sheetUsed = "";
@@ -391,6 +420,8 @@ function parseRepaymentWorkbook(buffer, fileName) {
         dpdOld: dpd,
         dpdNew: normalizeDpd(row.dpd_new),
         branch: branch || "Tidak diketahui",
+        area: String(row.area_name ?? "").trim(),
+        point: String(row.point_name ?? "").trim(),
         restructured,
         paid,
         movement: String(row.movement_label || "").trim(),
@@ -401,10 +432,25 @@ function parseRepaymentWorkbook(buffer, fileName) {
       existing.restructured = existing.restructured || restructured;
       existing.paid = existing.paid || paid;
       if (!existing.movement && row.movement_label) existing.movement = String(row.movement_label).trim();
+      if (!existing.area && row.area_name) existing.area = String(row.area_name).trim();
+      if (!existing.point && row.point_name) existing.point = String(row.point_name).trim();
     }
   }
 
-  const allLoans = [...uniqueLoans.values()];
+  const allLoansUnfiltered = [...uniqueLoans.values()];
+  const scope = resolveRequestedScope(rows, requestText);
+  if (scope.type === "not_found") {
+    const knownAreas = [...new Set(rows.map(row => String(row.area_name ?? "").trim()).filter(Boolean))];
+    throw new Error(`Area/branch yang diminta tidak ditemukan secara pasti. Contoh area pada file: ${knownAreas.slice(0, 12).join(", ") || "kolom area_name tidak tersedia"}. Sebutkan nama area/branch sesuai data Excel.`);
+  }
+  const allLoans = scope.type === "area"
+    ? allLoansUnfiltered.filter(loan => normalizeScopeText(loan.area) === normalizeScopeText(scope.value))
+    : scope.type === "branch"
+      ? allLoansUnfiltered.filter(loan => normalizeScopeText(loan.branch) === normalizeScopeText(scope.value) || normalizeScopeText(loan.point) === normalizeScopeText(scope.value))
+      : allLoansUnfiltered;
+  if (scope.type !== "all" && !allLoans.length) {
+    throw new Error(`Tidak ada loan yang cocok dengan ${scope.type} ${scope.value} setelah deduplikasi loan_id.`);
+  }
   const excludedRestru = allLoans.filter(loan => loan.restructured).length;
   const eligible = allLoans.filter(loan => !loan.restructured);
   const bucketDefs = [
@@ -425,7 +471,9 @@ function parseRepaymentWorkbook(buffer, fileName) {
     "🤖 VEBS — REPAYMENT REPORT",
     `📄 ${fileName}`,
     `📅 Cutoff: ${cutoffText}`,
-    "🌐 Scope: seluruh data dalam file (tanpa filter area)",
+    scope.type === "area" ? `🎯 Scope: AREA ${scope.value} saja` :
+      scope.type === "branch" ? `🎯 Scope: BRANCH/POINT ${scope.value} saja` :
+      "🌐 Scope: seluruh data dalam file (tidak ada filter scope pada permintaan)",
     `🚫 Restru excluded: ${fmtInt(excludedRestru)} loan`,
     "📌 Logic: bucket dari dpd_old | Paid jika payment_min_1x = Yes | loan_id unik"
   ];
@@ -458,7 +506,7 @@ function parseRepaymentWorkbook(buffer, fileName) {
       return { branch, paid: branchPaid, noa: branchNoa, rr: branchRR, gap: branchGap };
     }).sort((a, b) => a.rr - b.rr || b.gap - a.gap || b.noa - a.noa);
 
-    // Tanpa scope area: tampilkan seluruh branch dari file, diurutkan dari RR terendah.
+    // Tampilkan hanya branch/point di dalam scope terpilih; tanpa scope eksplisit, tetap seluruh file.
     branchStats.forEach((branch, index) => {
       const icon = branch.gap > 0 ? "🔴" : "🟢";
       const status = branch.gap > 0
@@ -511,8 +559,9 @@ function parseRepaymentWorkbook(buffer, fileName) {
   }
   if (blankLoanRows) lines.push(`ℹ️ ${fmtInt(blankLoanRows)} baris tanpa loan_id diabaikan.`);
   lines.push("ℹ️ CLOSED mengikuti data sumber; tidak dikecualikan otomatis.");
+  if (scope.type !== "all") lines.push(`🔒 Filter diterapkan sebelum perhitungan KPI: ${scope.type} ${scope.value}; area/branch lain tidak disertakan.`);
 
-  return { text: lines.join("\n"), rowCount: rows.length, sheetUsed };
+  return { text: lines.join("\n"), rowCount: rows.length, sheetUsed, scope };
 }
 
 async function processExcelAttachment(message, jid, fileInfo, isGroup) {
@@ -525,7 +574,8 @@ async function processExcelAttachment(message, jid, fileInfo, isGroup) {
     const buffer = Buffer.isBuffer(media) ? media : Buffer.from(media);
     if (!buffer.length) throw new Error("File Excel kosong atau gagal diunduh.");
     if (buffer.length > 20 * 1024 * 1024) throw new Error("Ukuran file melebihi batas 20 MB.");
-    const report = parseRepaymentWorkbook(buffer, fileInfo.fileName);
+    const requestText = extractText(message);
+    const report = parseRepaymentWorkbook(buffer, fileInfo.fileName, requestText);
     console.log(`[EXCEL] Analisis selesai: ${report.rowCount} baris, sheet=${report.sheetUsed}.`);
     await sendText(jid, report.text);
     console.log(`[EXCEL] Report terkirim. mime=${mediaType}; bytes=${buffer.length}.`);
@@ -573,7 +623,7 @@ async function handleMessage(message) {
     return;
   }
   if (/^(vebs\s+)?(excel analysis|analisa excel|analisis excel|mode excel)$/i.test(text.trim())) {
-    await sendText(jid, "📊 Mode Excel Analysis aktif. Kirim file Excel (.xlsx/.xls/.csv). Di grup, sertakan kata VEBS pada caption file. Report mencakup seluruh file tanpa filter area, target Current 98%, DPD 1–30 55%, DPD 31–60 15%, DPD 61–90 7%, RR berdasarkan payment_min_1x=Yes, dan restru dikecualikan.");
+    await sendText(jid, "📊 Mode Excel Analysis aktif. Kirim file Excel (.xlsx/.xls/.csv). Jika ingin membatasi hasil, tulis nama Area/Branch/Point dan kata 'saja' pada caption/perintah, misalnya: VEBS analisa Area Jember saja. Jika tidak ada scope yang disebutkan, VEBS menganalisis seluruh file. Target Current 98%, DPD 1–30 55%, DPD 31–60 15%, DPD 61–90 7%; RR berdasarkan payment_min_1x=Yes, restru dikecualikan.");
     return;
   }
   if (isGroup && !GROUP_TRIGGER_REGEX.test(text)) return;

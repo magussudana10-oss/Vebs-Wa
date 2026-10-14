@@ -1,4 +1,4 @@
-# VEBS AI Agent — RM Jawa Timur 5 (v2.1.0)
+# VEBS AI Agent — RM Jawa Timur 5 (v2.2.0)
 
 Paket ini merupakan upgrade inkremental dari versi yang diberikan. Integrasi WhatsApp Baileys, Gemini, endpoint QR/status, mekanisme retry/fallback, serta logika analisis Excel dipertahankan. Upgrade utama adalah instruksi AI khusus sebagai asisten pribadi Magus Sudana dan penyimpanan konteks percakapan secara persisten.
 
@@ -57,3 +57,11 @@ Memori:
 - `loan_state=CLOSED` tidak otomatis dikecualikan; aturan itu belum dikonfirmasi.
 - Hasil Excel bergantung pada kualitas data dan nama kolom sumber.
 - `node --check` memeriksa sintaks saja; tetap lakukan pengujian fungsional di Railway sebelum mengganti produksi.
+
+
+## Scope-aware Excel analysis (v2.2.0)
+- Excel caption/perintah dapat meminta satu Area, Branch, atau Point saja, misalnya `VEBS analisa Area Jember saja`.
+- Jika `area_name` tersedia, filter area diterapkan sebelum perhitungan KPI sehingga area lain tidak masuk hasil. Jika tidak ada area yang diminta, seluruh file tetap dianalisis.
+- Jika nama scope tidak bisa dipastikan dari kolom yang tersedia, VEBS memberi pesan bahwa scope tidak ditemukan; tidak diam-diam mengganti ke area lain.
+- Logika KPI yang ada tetap dipertahankan: bucket dari `dpd_old`, paid dari `payment_min_1x=Yes`, `loan_id` unik, dan restru dikecualikan.
+- Filter scope dari caption hanya berlaku untuk analisis lampiran Excel; perintah teks tanpa lampiran tetap dijawab oleh Gemini sesuai konteks.
