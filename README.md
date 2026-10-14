@@ -1,35 +1,30 @@
-# VEBS WhatsApp AI Bot — Group Mention
-
-Bot WhatsApp berbasis Baileys dengan Gemini AI.
+# VEBS WhatsApp AI Bot — Diagnostic Build
 
 ## Perilaku
-- Di grup: merespons hanya jika pesan menyebut `vebs` (tidak peka huruf besar/kecil).
-- Di chat pribadi: merespons pesan teks seperti sebelumnya.
-- Balasan grup dikirim kembali ke grup asal.
-- QR page dan status endpoint tetap tersedia.
-
-## File
-- `package.json`
-- `server.js`
-- `README.md`
+- Chat pribadi: membalas pesan teks melalui Gemini.
+- Grup: membalas jika teks/caption menyebut kata `vebs` (tidak peka huruf besar-kecil).
+- Log diagnostik mencatat apakah pesan masuk berasal dari grup atau chat pribadi, apakah teks terdeteksi, dan apakah pemicu terdeteksi. Isi pesan dan nomor anggota tidak dicatat.
+- Mencoba ulang error Gemini sementara (503/429/5xx).
+- Model cadangan opsional melalui `GEMINI_FALLBACK_MODEL`.
 
 ## Railway Variables
 - `GEMINI_API_KEY`: API key Gemini (rahasia)
-- `GEMINI_MODEL`: model Gemini utama yang sudah tersedia untuk API key Anda
-- `GEMINI_FALLBACK_MODEL`: opsional; model cadangan yang sudah dipastikan tersedia untuk API key Anda. Jika model utama mendapat 503/429/5xx, VEBS mencoba ulang lalu mencoba model cadangan.
-- `QR_PAGE_TOKEN`: token rahasia untuk membuka halaman QR
-- `AUTH_DIR`: `/data/auth` jika Railway Volume dipasang pada `/data`
-- `PORT`: disediakan oleh Railway
-
-## Penanganan error Gemini
-Kode mencoba ulang error sementara (503/429/5xx) hingga tiga kali per model. Jika memakai `GEMINI_FALLBACK_MODEL`, pastikan nama model cadangan benar-benar tersedia untuk API key Anda.
+- `GEMINI_MODEL`: model utama yang sudah dipastikan tersedia untuk API key
+- `GEMINI_FALLBACK_MODEL`: opsional; isi hanya dengan model yang sudah dipastikan tersedia untuk API key
+- `QR_PAGE_TOKEN`: token rahasia halaman QR
+- `AUTH_DIR`: `/data/auth` jika Railway Volume terpasang pada `/data`
+- `PORT`: disediakan otomatis oleh Railway
 
 ## Deploy
 1. Ekstrak ZIP.
-2. Unggah file di dalam folder `vebs-whatsapp-group-bot` ke repository GitHub yang dipakai Railway.
-3. Commit changes dan tunggu redeploy.
-4. Pastikan Railway Volume persisten tetap terpasang di `/data`.
-5. Uji di grup dengan pesan `Vebs, halo!`.
+2. Ganti `server.js` di GitHub dengan file dari ZIP.
+3. Commit changes dan tunggu Railway redeploy.
+4. Jangan hapus Railway Volume atau sesi autentikasi.
+5. Tes chat pribadi dengan `Halo VEBS`.
+6. Tes grup dengan `Vebs, halo!`.
+7. Buka Railway Logs dan cari `[WA IN] type=GROUP ... trigger=true`.
 
-## Keamanan
-Jangan commit API key, QR, token, atau sesi WhatsApp ke repository. Baileys adalah integrasi WhatsApp Web tidak resmi; koneksi dapat berubah atau logout.
+## Catatan
+- Error 503 berasal dari ketersediaan model Gemini; retry tidak menjamin layanan selalu tersedia.
+- Jangan commit API key, QR, token, atau sesi WhatsApp ke GitHub.
+- Baileys adalah integrasi WhatsApp Web tidak resmi dan dapat berubah sewaktu-waktu.
