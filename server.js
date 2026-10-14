@@ -3,9 +3,11 @@ import QRCode from "qrcode";
 import makeWASocket, {
   DisconnectReason,
   useMultiFileAuthState,
+  downloadMediaMessage,
   Browsers
 } from "@whiskeysockets/baileys";
 import { GoogleGenAI } from "@google/genai";
+import * as XLSX from "xlsx";
 import fs from "node:fs";
 
 const app = express();
@@ -72,6 +74,8 @@ app.get("/status", (_req, res) => {
     primaryGeminiModel: GEMINI_MODEL,
     fallbackGeminiModels: getGeminiModels().filter(model => model !== GEMINI_MODEL),
     groupTrigger: "vebs (case-insensitive)",
+    excelAnalysis: "xlsx/xls/csv attachment; whole file, no area filter",
+    kpiTargets: { current: 0.98, dpd1_30: 0.55, dpd31_60: 0.15, dpd61_90: 0.07 },
     incomingUpsertEvents: incomingEventCount,
     acceptedMessages: acceptedMessageCount,
     lastIncomingAt
@@ -217,6 +221,238 @@ async function sendText(jid, text) {
   await sock.sendMessage(jid, { text });
 }
 
+function getExcelDocument(message) {
+  const content = unwrapMessage(message?.message);
+  const doc = content?.documentMessage;
+  if (!doc) return null;
+  const fileName = String(doc.fileName || "uploaded.xlsx");
+  const mime = String(doc.mimetype || "").toLowerCase();
+  const isExcel = /\.(xlsx|xls|xlsm|csv)$/i.test(fileName) ||
+    /spreadsheetml|ms-excel|text\/csv|application\/csv/.test(mime);
+  return isExcel ? { fileName, mime } : null;
+}
+
+function normalizeYes(value) {
+  return ["yes", "ya", "y", "true", "1", "yes "].includes(
+    String(value ?? "").trim().toLowerCase()
+  );
+}
+
+function normalizeDpd(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function getKpiBucket(dpd) {
+  if (dpd === 0) return { key: "current", label: "CURRENT / DPD 0", target: 0.98 };
+  if (dpd >= 1 && dpd <= 30) return { key: "dpd1_30", label: "DPD 1–30", target: 0.55 };
+  if (dpd >= 31 && dpd <= 60) return { key: "dpd31_60", label: "DPD 31–60", target: 0.15 };
+  if (dpd >= 61 && dpd <= 90) return { key: "dpd61_90", label: "DPD 61–90", target: 0.07 };
+  return null;
+}
+
+function fmtInt(value) {
+  return Math.round(Number(value) || 0).toLocaleString("id-ID");
+}
+
+function fmtPct(value) {
+  return `${(Number(value) * 100).toLocaleString("id-ID", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}%`;
+}
+
+function getExcelDate(value) {
+  if (!value) return "-";
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleDateString("id-ID", { day: "2-digit", month: "short", year: "numeric", timeZone: "Asia/Jakarta" });
+}
+
+function parseRepaymentWorkbook(buffer, fileName) {
+  const workbook = XLSX.read(buffer, { type: "buffer", cellDates: true });
+  let rows = [];
+  let sheetUsed = "";
+  const required = ["loan_id", "dpd_old", "is_loan_restructured", "payment_min_1x"];
+
+  for (const sheetName of workbook.SheetNames) {
+    const sheet = workbook.Sheets[sheetName];
+    const candidate = XLSX.utils.sheet_to_json(sheet, { defval: null, raw: true });
+    if (!candidate.length) continue;
+    const headers = Object.keys(candidate[0]).map(key => key.trim().toLowerCase());
+    if (required.every(key => headers.includes(key))) {
+      rows = candidate;
+      sheetUsed = sheetName;
+      break;
+    }
+  }
+
+  if (!rows.length) {
+    throw new Error("Kolom wajib tidak ditemukan. Pastikan ada loan_id, dpd_old, is_loan_restructured, dan payment_min_1x.");
+  }
+  if (rows.length > 250000) throw new Error("File melebihi batas 250.000 baris untuk analisis WhatsApp.");
+
+  const uniqueLoans = new Map();
+  let blankLoanRows = 0;
+  for (const row of rows) {
+    const loanId = String(row.loan_id ?? "").trim();
+    if (!loanId) { blankLoanRows++; continue; }
+    const dpd = normalizeDpd(row.dpd_old);
+    if (dpd === null) continue;
+    const branch = String(row.branch_name || row.point_name || row.area_name || "Tidak diketahui").trim();
+    const restructured = normalizeYes(row.is_loan_restructured);
+    const paid = normalizeYes(row.payment_min_1x);
+    const existing = uniqueLoans.get(loanId);
+    if (!existing) {
+      uniqueLoans.set(loanId, {
+        loanId,
+        dpdOld: dpd,
+        dpdNew: normalizeDpd(row.dpd_new),
+        branch: branch || "Tidak diketahui",
+        restructured,
+        paid,
+        movement: String(row.movement_label || "").trim(),
+        cutoff: row.cutoff_bucket || null,
+        loanState: String(row.loan_state || "").trim()
+      });
+    } else {
+      existing.restructured = existing.restructured || restructured;
+      existing.paid = existing.paid || paid;
+      if (!existing.movement && row.movement_label) existing.movement = String(row.movement_label).trim();
+    }
+  }
+
+  const allLoans = [...uniqueLoans.values()];
+  const excludedRestru = allLoans.filter(loan => loan.restructured).length;
+  const eligible = allLoans.filter(loan => !loan.restructured);
+  const bucketDefs = [
+    { key: "current", label: "CURRENT / DPD 0", target: 0.98 },
+    { key: "dpd1_30", label: "DPD 1–30", target: 0.55 },
+    { key: "dpd31_60", label: "DPD 31–60", target: 0.15 },
+    { key: "dpd61_90", label: "DPD 61–90", target: 0.07 }
+  ];
+  const buckets = new Map(bucketDefs.map(def => [def.key, { ...def, loans: [] }]));
+  for (const loan of eligible) {
+    const def = getKpiBucket(loan.dpdOld);
+    if (def) buckets.get(def.key).loans.push(loan);
+  }
+
+  const cutoff = allLoans.find(loan => loan.cutoff)?.cutoff;
+  const cutoffText = getExcelDate(cutoff);
+  const lines = [
+    "🤖 VEBS — REPAYMENT REPORT",
+    `📄 ${fileName}`,
+    `📅 Cutoff: ${cutoffText}`,
+    "🌐 Scope: seluruh data dalam file (tanpa filter area)",
+    `🚫 Restru excluded: ${fmtInt(excludedRestru)} loan`,
+    "📌 Logic: bucket dari dpd_old | Paid jika payment_min_1x = Yes | loan_id unik"
+  ];
+
+  const summary = [];
+  for (const def of bucketDefs) {
+    const bucket = buckets.get(def.key);
+    const loans = bucket.loans;
+    if (!loans.length) continue;
+    const paidCount = loans.filter(loan => loan.paid).length;
+    const noa = loans.length;
+    const rr = noa ? paidCount / noa : 0;
+    const requiredPaid = Math.ceil(noa * def.target);
+    const gap = Math.max(0, requiredPaid - paidCount);
+    const targetMet = gap === 0;
+    lines.push("");
+    lines.push(`📊 REPAYMENT ${def.label}`);
+    lines.push(`🎯 Target KPI: ${fmtPct(def.target)}`);
+
+    const byBranch = new Map();
+    for (const loan of loans) {
+      if (!byBranch.has(loan.branch)) byBranch.set(loan.branch, []);
+      byBranch.get(loan.branch).push(loan);
+    }
+    const branchStats = [...byBranch.entries()].map(([branch, items]) => {
+      const branchPaid = items.filter(item => item.paid).length;
+      const branchNoa = items.length;
+      const branchRR = branchNoa ? branchPaid / branchNoa : 0;
+      const branchGap = Math.max(0, Math.ceil(branchNoa * def.target) - branchPaid);
+      return { branch, paid: branchPaid, noa: branchNoa, rr: branchRR, gap: branchGap };
+    }).sort((a, b) => a.rr - b.rr || b.gap - a.gap || b.noa - a.noa);
+
+    // Tanpa scope area: tampilkan seluruh branch dari file, diurutkan dari RR terendah.
+    branchStats.forEach((branch, index) => {
+      const icon = branch.gap > 0 ? "🔴" : "🟢";
+      const status = branch.gap > 0
+        ? `Kurang | kurang ${fmtInt(branch.gap)} loan`
+        : `Target tercapai | surplus ${fmtInt(branch.paid - Math.ceil(branch.noa * def.target))} loan`;
+      lines.push(`${index + 1}. ${branch.branch} — ${fmtInt(branch.paid)}/${fmtInt(branch.noa)} — ${fmtPct(branch.rr)} ${icon} ${status}`);
+    });
+    lines.push(`TOTAL — ${fmtInt(paidCount)}/${fmtInt(noa)} — ${fmtPct(rr)} ${targetMet ? "🟢 Target tercapai" : "🔴 Kurang"}${gap > 0 ? ` | kurang ${fmtInt(gap)} loan` : ""}`);
+
+    const worst = branchStats[0];
+    if (worst) lines.push(`⚠️ Fokus: ${worst.branch} ${fmtPct(worst.rr)} (target ${fmtPct(def.target)})`);
+    summary.push({ ...def, noa, paidCount, rr, gap, branch: worst?.branch || "-", branchRR: worst?.rr ?? 0 });
+  }
+
+  const movementLoans = eligible.filter(loan => loan.movement);
+  const movementCounts = new Map();
+  for (const loan of movementLoans) {
+    const label = loan.movement;
+    movementCounts.set(label, (movementCounts.get(label) || 0) + 1);
+  }
+  const flowEntries = [...movementCounts.entries()]
+    .filter(([label]) => /flow to|new flow/i.test(label))
+    .sort((a, b) => b[1] - a[1]);
+  const rollbackCount = [...movementCounts.entries()]
+    .filter(([label]) => /rollback/i.test(label))
+    .reduce((sum, [, count]) => sum + count, 0);
+  const naikCount = flowEntries.reduce((sum, [, count]) => sum + count, 0);
+
+  lines.push("");
+  lines.push("➡️ MOVEMENT (restru dikecualikan)");
+  if (flowEntries.length) {
+    for (const [label, count] of flowEntries.slice(0, 5)) {
+      lines.push(`• ${label}: ${fmtInt(count)}`);
+    }
+  } else {
+    lines.push("• Tidak ada flow naik bucket pada data eligible.");
+  }
+  lines.push(`• Naik bucket: ${fmtInt(naikCount)}`);
+  lines.push(`• Rollback turun bucket: ${fmtInt(rollbackCount)}`);
+
+  lines.push("");
+  lines.push("💡 SUMMARY");
+  if (summary.length) {
+    const priority = [...summary].sort((a, b) => (a.rr / a.target) - (b.rr / b.target))[0];
+    lines.push(`🔴 Perlu fokus: ${priority.label} ${fmtPct(priority.rr)} (target ${fmtPct(priority.target)})`);
+    lines.push(`🎯 Fokus recovery: ${priority.branch} (${priority.label}, ${fmtPct(priority.branchRR)})`);
+    lines.push(`📈 KPI dianalisis: ${summary.map(item => item.label).join(", ")}`);
+  } else {
+    lines.push("Tidak ada pinjaman eligible pada bucket KPI 0–90 setelah restru dikecualikan.");
+  }
+  if (blankLoanRows) lines.push(`ℹ️ ${fmtInt(blankLoanRows)} baris tanpa loan_id diabaikan.`);
+  lines.push("ℹ️ CLOSED mengikuti data sumber; tidak dikecualikan otomatis.");
+
+  return { text: lines.join("\n"), rowCount: rows.length, sheetUsed };
+}
+
+async function processExcelAttachment(message, jid, fileInfo, isGroup) {
+  try {
+    const mediaType = fileInfo.mime || "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+    console.log(`[EXCEL] Mulai mengunduh dan menganalisis ${fileInfo.fileName} (${isGroup ? "group" : "private"}).`);
+    const media = await downloadMediaMessage(message, "buffer", {}, {
+      reuploadRequest: sock?.updateMediaMessage
+    });
+    const buffer = Buffer.isBuffer(media) ? media : Buffer.from(media);
+    if (!buffer.length) throw new Error("File Excel kosong atau gagal diunduh.");
+    if (buffer.length > 20 * 1024 * 1024) throw new Error("Ukuran file melebihi batas 20 MB.");
+    const report = parseRepaymentWorkbook(buffer, fileInfo.fileName);
+    console.log(`[EXCEL] Analisis selesai: ${report.rowCount} baris, sheet=${report.sheetUsed}.`);
+    await sendText(jid, report.text);
+    console.log(`[EXCEL] Report terkirim. mime=${mediaType}; bytes=${buffer.length}.`);
+  } catch (error) {
+    console.error(`[EXCEL] Gagal analisis: ${error?.message || String(error)}`);
+    await sendText(jid,
+      "⚠️ VEBS belum bisa membaca file Excel ini. Pastikan format .xlsx/.xls/.csv dan kolom tersedia: loan_id, dpd_old, is_loan_restructured, payment_min_1x.\n" +
+      `Detail: ${String(error?.message || error).slice(0, 250)}`
+    ).catch(sendError => console.error("[EXCEL] Gagal mengirim error:", sendError?.message || String(sendError)));
+  }
+}
+
 async function handleMessage(message) {
   if (!message?.message || message.key?.fromMe) return;
   const jid = message.key?.remoteJid;
@@ -226,13 +462,33 @@ async function handleMessage(message) {
   const text = extractText(message);
   const id = message.key?.id;
   const sender = message.key?.participant || jid;
+  const excelDocument = getExcelDocument(message);
   lastIncomingAt = new Date().toISOString();
 
   // Log ini harus terlihat saat ada pesan baru; tidak mencetak isi pesan atau nomor anggota.
-  console.log(`[WA IN] type=${isGroup ? "GROUP" : "PRIVATE"} hasText=${Boolean(text)} trigger=${isGroup && text ? GROUP_TRIGGER_REGEX.test(text) : false} messageId=${Boolean(id)}`);
+  console.log(`[WA IN] type=${isGroup ? "GROUP" : "PRIVATE"} hasText=${Boolean(text)} hasExcel=${Boolean(excelDocument)} trigger=${isGroup && text ? GROUP_TRIGGER_REGEX.test(text) : false} messageId=${Boolean(id)}`);
+
+  if (excelDocument) {
+    // Di grup, caption harus menyebut VEBS agar file tidak dianalisis tanpa diminta.
+    if (isGroup && !GROUP_TRIGGER_REGEX.test(text)) {
+      console.log("[EXCEL] Lampiran grup diabaikan: caption harus menyebut VEBS.");
+      return;
+    }
+    const excelDedupeKey = `${jid}:${id || `${Date.now()}-excel`}`;
+    if (processedMessages.has(excelDedupeKey)) return;
+    processedMessages.add(excelDedupeKey);
+    if (processedMessages.size > MAX_PROCESSED_IDS) processedMessages.delete(processedMessages.values().next().value);
+    acceptedMessageCount++;
+    await processExcelAttachment(message, jid, excelDocument, isGroup);
+    return;
+  }
 
   if (!text) {
     console.log("[WA IN] Pesan diabaikan: tidak ada teks/caption yang bisa diproses.");
+    return;
+  }
+  if (/^(vebs\s+)?(excel analysis|analisa excel|analisis excel|mode excel)$/i.test(text.trim())) {
+    await sendText(jid, "📊 Mode Excel Analysis aktif. Kirim file Excel (.xlsx/.xls/.csv). Di grup, sertakan kata VEBS pada caption file. Report mencakup seluruh file tanpa filter area, target Current 98%, DPD 1–30 55%, DPD 31–60 15%, DPD 61–90 7%, RR berdasarkan payment_min_1x=Yes, dan restru dikecualikan.");
     return;
   }
   if (isGroup && !GROUP_TRIGGER_REGEX.test(text)) return;
@@ -304,7 +560,7 @@ async function connectWhatsApp() {
         starting = false;
         reconnectDelayMs = 5000;
         console.log("[WA] VEBS berhasil terhubung ke WhatsApp.");
-        console.log("[WA] Listener pesan aktif. Grup: balas jika teks mengandung 'vebs'; chat pribadi: balas teks.");
+        console.log("[WA] Listener aktif. Grup: kata VEBS; chat pribadi: teks; Excel Analysis: lampiran xlsx/xls/csv.");
       }
       if (connection === "close") {
         connected = false;

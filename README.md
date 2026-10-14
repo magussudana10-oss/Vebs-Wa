@@ -1,16 +1,28 @@
-# VEBS WhatsApp AI Bot — Fixed server.js
+# VEBS WhatsApp Bot — Excel Analysis
 
-- Grup: membalas jika teks/caption mengandung kata `vebs` (tidak peka huruf besar/kecil).
-- Chat pribadi: membalas pesan teks.
-- Gemini: model utama `gemini-3.8-flash`, lalu fallback otomatis ke `gemini-3.6-flash` dan `gemini-3.5-flash-lite` jika terjadi gangguan/akses model.
-- Diagnostik: `/status`, `/health`, dan log `[WA EVENT]` serta `[WA IN]`.
-- QR page: `/qr?token=...`.
+## Fitur
+- Membaca file Excel `.xlsx`, `.xls`, atau `.csv` yang dikirim ke WhatsApp.
+- Chat pribadi: kirim file Excel langsung untuk analisis.
+- Grup WhatsApp: lampirkan file dan sertakan kata `VEBS` pada caption, misalnya `VEBS analisis excel`.
+- Tidak ada filter/scope area: analisis seluruh baris pada file; daftar seluruh cabang diurutkan dari RR terendah untuk setiap bucket.
+- KPI: Current/DPD 0 98%; DPD 1–30 55%; DPD 31–60 15%; DPD 61–90 7%.
+- Bucket menggunakan `dpd_old`; restru dikecualikan; Paid dihitung dari `payment_min_1x = Yes`; `loan_id` unik.
+- Movement dihitung dari `movement_label` setelah restru dikecualikan.
+- `loan_state=CLOSED` tidak otomatis dikecualikan pada versi ini karena aturan tersebut belum dikonfirmasi.
+- Kolom wajib: `loan_id`, `dpd_old`, `is_loan_restructured`, `payment_min_1x`.
+- Maksimum file 20 MB dan 250.000 baris.
 
-## Railway variables
-Wajib: `GEMINI_API_KEY`, `QR_PAGE_TOKEN`.
-Disarankan: `GEMINI_MODEL=gemini-3.8-flash`, `GEMINI_FALLBACK_MODEL=gemini-3.6-flash`, `AUTH_DIR=/data/auth` jika volume dipasang di `/data`.
+## Deploy ke Railway
+1. Ganti `server.js` dan `package.json` di GitHub dengan versi dari paket ini.
+2. Commit perubahan, lalu pastikan Railway deploy commit terbaru (Auto Deploy harus aktif atau gunakan Deploy Latest Commit).
+3. Jangan menghapus volume `/data/auth`, jangan mengganti `GEMINI_API_KEY` atau `QR_PAGE_TOKEN`.
+4. Setelah deploy, kirim file Excel ke chat pribadi VEBS; untuk grup, tambahkan kata VEBS di caption.
 
-`GEMINI_FALLBACK_MODEL` akan dicoba setelah model utama; kode juga mencoba model cadangan bawaan yang unik. Jangan menaruh API key, QR token, atau data sesi di GitHub.
+## Contoh caption
+`VEBS analisis excel`
 
-## Deploy
-Ganti `server.js` di repository `magussudana10-oss/Vebs-Wa` dengan file ini lalu commit. Pastikan Railway benar-benar melakukan redeploy dari commit baru. Jangan menghapus volume `/data/auth`.
+## Variabel Railway yang tetap diperlukan
+- `GEMINI_API_KEY`
+- `QR_PAGE_TOKEN`
+- `AUTH_DIR=/data/auth` jika volume dipasang pada `/data/auth`
+- `GEMINI_MODEL` dan `GEMINI_FALLBACK_MODEL` untuk AI chat biasa
