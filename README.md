@@ -1,28 +1,52 @@
-# VEBS WhatsApp Bot — Excel Analysis
+# VEBS AI Agent — RM Jawa Timur 5 (v2.0.0)
 
-## Fitur
-- Membaca file Excel `.xlsx`, `.xls`, atau `.csv` yang dikirim ke WhatsApp.
-- Chat pribadi: kirim file Excel langsung untuk analisis.
-- Grup WhatsApp: lampirkan file dan sertakan kata `VEBS` pada caption, misalnya `VEBS analisis excel`.
-- Tidak ada filter/scope area: analisis seluruh baris pada file; daftar seluruh cabang diurutkan dari RR terendah untuk setiap bucket.
-- KPI: Current/DPD 0 98%; DPD 1–30 55%; DPD 31–60 15%; DPD 61–90 7%.
-- Bucket menggunakan `dpd_old`; restru dikecualikan; Paid dihitung dari `payment_min_1x = Yes`; `loan_id` unik.
-- Movement dihitung dari `movement_label` setelah restru dikecualikan.
-- `loan_state=CLOSED` tidak otomatis dikecualikan pada versi ini karena aturan tersebut belum dikonfirmasi.
-- Kolom wajib: `loan_id`, `dpd_old`, `is_loan_restructured`, `payment_min_1x`.
-- Maksimum file 20 MB dan 250.000 baris.
+Paket ini memperkuat prompt AI VEBS agar berperan sebagai asisten analisis untuk pekerjaan RM Regional Jawa Timur 5, sambil mempertahankan integrasi WhatsApp Baileys, Gemini, endpoint QR/status, dan fitur analisis Excel yang sudah ada pada kode sumber.
 
-## Deploy ke Railway
-1. Ganti `server.js` dan `package.json` di GitHub dengan versi dari paket ini.
-2. Commit perubahan, lalu pastikan Railway deploy commit terbaru (Auto Deploy harus aktif atau gunakan Deploy Latest Commit).
-3. Jangan menghapus volume `/data/auth`, jangan mengganti `GEMINI_API_KEY` atau `QR_PAGE_TOKEN`.
-4. Setelah deploy, kirim file Excel ke chat pribadi VEBS; untuk grup, tambahkan kata VEBS di caption.
+## Fitur yang tersedia
+- Chat WhatsApp pribadi; balasan grup jika pesan teks/caption mengandung kata `VEBS`.
+- Instruksi AI khusus RM: repayment, portfolio quality, KPI, GAP, flow/movement, dan rekomendasi tindakan berbasis fakta.
+- Riwayat percakapan per chat tersimpan di memori proses untuk konteks pertanyaan lanjutan; riwayat ini belum persisten setelah proses Railway restart.
+- Analisis lampiran Excel `.xlsx`, `.xls`, `.xlsm`, atau `.csv`.
+- Laporan seluruh data dalam file tanpa filter/scope area, daftar cabang diurutkan dari RR terendah untuk tiap bucket.
+- Target KPI: Current/DPD 0 98%; DPD 1–30 55%; DPD 31–60 15%; DPD 61–90 7%.
+- Bucket berdasarkan `dpd_old`; restruktur dikecualikan; Paid berdasarkan `payment_min_1x = Yes`; deduplikasi menggunakan `loan_id`.
+- Movement dihitung dari `movement_label` setelah restruktur dikecualikan.
+- `loan_state=CLOSED` tidak otomatis dikecualikan karena aturan tersebut belum dikonfirmasi.
+- Endpoint `/health`, `/status`, dan `/qr?token=...`.
+- Retry dan model fallback Gemini sesuai konfigurasi.
 
-## Contoh caption
-`VEBS analisis excel`
+## Kolom wajib Excel
+`loan_id`, `dpd_old`, `is_loan_restructured`, `payment_min_1x`.
 
-## Variabel Railway yang tetap diperlukan
+Kolom tambahan untuk rincian cabang/movement: `branch_name` (atau `point_name`/`area_name`), `dpd_new`, `movement_label`, `cutoff_bucket`, `loan_state`.
+
+Batas file: 20 MB dan 250.000 baris.
+
+## Environment variables Railway
+Wajib:
 - `GEMINI_API_KEY`
 - `QR_PAGE_TOKEN`
-- `AUTH_DIR=/data/auth` jika volume dipasang pada `/data/auth`
-- `GEMINI_MODEL` dan `GEMINI_FALLBACK_MODEL` untuk AI chat biasa
+
+Disarankan/perlu sesuai deployment:
+- `AUTH_DIR=/data/auth` jika persistent volume dipasang di `/data/auth`
+- `GEMINI_MODEL`
+- `GEMINI_FALLBACK_MODEL`
+- `PORT` biasanya diberikan otomatis oleh Railway
+
+## Deploy dengan aman
+1. Backup kode repository dan catat environment variables yang ada.
+2. Ganti `server.js` dan `package.json` dengan file dari paket ini.
+3. Commit perubahan ke branch production yang benar dan deploy commit tersebut di Railway.
+4. **Jangan menghapus persistent volume `/data/auth`**, jangan mengubah `AUTH_DIR` dari lokasi sesi yang aktif, dan jangan mengganti `GEMINI_API_KEY` atau `QR_PAGE_TOKEN`.
+5. Setelah deploy, cek `/health` dan `/status` pada domain Railway.
+6. Tes chat pribadi, tes pesan grup dengan kata `VEBS`, lalu kirim file Excel kecil sebagai tes.
+
+## Menggunakan analisis Excel
+- Chat pribadi: kirim file Excel langsung ke VEBS.
+- Grup: lampirkan file dan tulis kata `VEBS` di caption, misalnya `VEBS analisis excel`.
+
+## Batasan yang perlu diketahui
+- Versi ini tidak melakukan monitoring proaktif terjadwal atau mengirim laporan otomatis; fitur itu memerlukan scheduler/automation dan sumber data yang ditentukan.
+- Memori percakapan saat ini hanya berada di memori proses dan akan hilang saat service restart.
+- Hasil analisis bergantung pada nama kolom dan kualitas data sumber. `loan_state=CLOSED` tetap dihitung jika tidak ada aturan lain yang dikonfirmasi.
+- Uji di lingkungan aman sebelum menimpa produksi.
