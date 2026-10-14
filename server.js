@@ -13,33 +13,39 @@ app.disable("x-powered-by");
 
 const PORT = Number(process.env.PORT || 3000);
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.8-flash";
 const QR_PAGE_TOKEN = process.env.QR_PAGE_TOKEN;
-const AUTH_DIR = process.env.AUTH_DIR || "./auth_info";
+const AUTH_DIR = process.env.AUTH_DIR || "/data/auth";
+
 const BOT_NAME = "VEBS";
+const TRIGGER_REGEX = /\bvebs\b/i;
+const MAX_HISTORY_MESSAGES = 12;
 
 if (!GEMINI_API_KEY) {
-  throw new Error("GEMINI_API_KEY belum diatur pada environment variables.");
+  throw new Error("GEMINI_API_KEY belum diatur di Railway.");
 }
 if (!QR_PAGE_TOKEN) {
-  throw new Error("QR_PAGE_TOKEN belum diatur pada environment variables.");
+  throw new Error("QR_PAGE_TOKEN belum diatur di Railway.");
 }
 
 const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
-let sock;
+let sock = null;
 let latestQR = null;
 let connected = false;
-let reconnectTimer = null;
-let isStarting = false;
+let starting = false;
 let loggedOut = false;
+let reconnectTimer = null;
+
 const histories = new Map();
-const MAX_HISTORY_MESSAGES = 12;
 const messageQueue = new Map();
+const processedMessages = new Set();
 
 app.get("/", (_req, res) => {
   res.type("text").send(
-    `${BOT_NAME} WhatsApp AI Bot | Status: ${connected ? "connected" : "waiting"}`
+    `${BOT_NAME} WhatsApp AI Bot | Status: ${
+      connected ? "connected" : "waiting"
+    }`
   );
 });
 
@@ -48,7 +54,8 @@ app.get("/status", (_req, res) => {
   res.json({
     bot: BOT_NAME,
     whatsapp: connected ? "connected" : "disconnected",
-    gemini: "configured"
+    gemini: "configured",
+    groupTrigger: "vebs"
   });
 });
 
@@ -71,12 +78,12 @@ app.get("/qr", async (req, res) => {
 <html lang="id"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="refresh" content="5"><title>VEBS QR</title>
 <body style="font-family:Arial;text-align:center;padding:32px">
-<h2>VEBS sedang menyiapkan QR Code...</h2><p>Halaman akan diperiksa lagi dalam 5 detik.</p>
-</body></html>`);
+<h2>VEBS sedang menyiapkan QR Code...</h2>
+<p>Halaman akan diperiksa kembali dalam 5 detik.</p></body></html>`);
   }
 
   try {
-    const dataUrl = await QRCode.toDataURL(latestQR, {
+    const image = await QRCode.toDataURL(latestQR, {
       errorCorrectionLevel: "M",
       margin: 2,
       width: 360
@@ -84,22 +91,21 @@ app.get("/qr", async (req, res) => {
 
     return res.type("html").send(`<!doctype html>
 <html lang="id"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Hubungkan WhatsApp ke VEBS</title>
+<title>VEBS WhatsApp QR</title>
 <body style="font-family:Arial,sans-serif;text-align:center;padding:24px">
 <h1>VEBS WhatsApp AI</h1>
-<p>Di WhatsApp buka <b>Perangkat tertaut → Tautkan perangkat</b>, lalu scan QR ini.</p>
-<img src="${dataUrl}" alt="WhatsApp QR Code" style="width:min(90vw,360px)">
-<p>Halaman memperbarui QR setiap 20 detik.</p>
-<p><b>Jangan bagikan QR atau token halaman ini.</b></p>
-<script>setTimeout(()=>location.reload(),20000)</script>
+<p>WhatsApp → Perangkat tertaut → Tautkan perangkat</p>
+<img src="${image}" alt="WhatsApp QR" style="width:min(90vw,360px)">
+<p>Jangan bagikan QR atau tautan rahasia ini.</p>
+<script>setTimeout(() => location.reload(), 20000)</script>
 </body></html>`);
   } catch (error) {
-    console.error("QR generation failed:", error.message);
-    return res.status(500).type("text").send("Gagal membuat QR Code.");
+    console.error("QR error:", error.message);
+    return res.status(500).send("Gagal membuat QR Code.");
   }
 });
 
-function getText(message) {
+function extractText(message) {
   const m = message.message || {};
   return (
     m.conversation ||
@@ -113,30 +119,38 @@ function getText(message) {
   ).trim();
 }
 
-async function askGemini(sender, userText) {
-  const history = histories.get(sender) || [];
+function getHistoryKey(jid, sender) {
+  return jid.endsWith("@g.us") ? `${jid}:${sender}` : jid;
+}
+
+async function askGemini(historyKey, userText, isGroup) {
+  const history = histories.get(historyKey) || [];
   const contents = [
     ...history,
     { role: "user", parts: [{ text: userText }] }
   ];
 
-  const result = await ai.models.generateContent({
+  const response = await ai.models.generateContent({
     model: GEMINI_MODEL,
     contents,
     config: {
-      systemInstruction:
-        "Kamu adalah VEBS, asisten AI WhatsApp yang ramah, santai, cerdas, dan membantu. " +
-        "Utamakan bahasa Indonesia, jawab dengan jelas dan jujur. " +
-        "Jika tidak tahu jawabannya, katakan dengan jujur.",
+      systemInstruction: `
+Kamu adalah VEBS, asisten AI WhatsApp yang ramah, cerdas, santai, dan membantu.
+Gunakan bahasa Indonesia kecuali pengguna meminta bahasa lain.
+Jawab dengan jelas, relevan, dan jujur. Jangan mengarang fakta.
+${isGroup
+  ? "Kamu menjawab di grup WhatsApp. Buat jawaban ringkas, sopan, dan cocok dibaca semua anggota."
+  : "Kamu menjawab chat pribadi WhatsApp."}
+      `.trim(),
       temperature: 0.7,
       maxOutputTokens: 800
     }
   });
 
-  const answer = result.text?.trim();
-  if (!answer) throw new Error("Gemini tidak menghasilkan teks jawaban.");
+  const answer = response.text?.trim();
+  if (!answer) throw new Error("Gemini tidak menghasilkan jawaban.");
 
-  histories.set(sender, [
+  histories.set(historyKey, [
     ...contents,
     { role: "model", parts: [{ text: answer }] }
   ].slice(-MAX_HISTORY_MESSAGES));
@@ -144,45 +158,75 @@ async function askGemini(sender, userText) {
   return answer;
 }
 
-async function processIncomingMessage(message) {
+async function handleMessage(message) {
   if (!message?.message || message.key?.fromMe) return;
 
   const jid = message.key.remoteJid;
-  if (!jid || jid === "status@broadcast" || jid.endsWith("@g.us")) return;
-  if (message.key.remoteJid?.endsWith("@newsletter")) return;
+  const sender = message.key.participant || jid;
 
-  const userText = getText(message);
-  if (!userText) return;
+  if (
+    !jid ||
+    jid === "status@broadcast" ||
+    jid.endsWith("@newsletter")
+  ) return;
 
-  // Serialkan pesan dari pengirim yang sama agar urutan percakapan terjaga.
-  const previous = messageQueue.get(jid) || Promise.resolve();
-  const current = previous
-    .catch(() => {})
-    .then(async () => {
-      try {
-        console.log(`${BOT_NAME}: pesan masuk dari ${jid}`);
-        const answer = await askGemini(jid, userText);
-        if (sock && connected) {
-          await sock.sendMessage(jid, { text: answer });
-        }
-      } catch (error) {
-        console.error("Message handling error:", error.message);
-        if (sock && connected) {
-          await sock.sendMessage(jid, {
-            text: "Maaf, VEBS sedang mengalami kendala. Coba lagi sebentar ya."
-          }).catch(() => {});
-        }
+  const isGroup = jid.endsWith("@g.us");
+  const text = extractText(message);
+  if (!text) return;
+
+  // Dalam grup, jawab hanya ketika nama VEBS disebut.
+  // Chat pribadi tetap mendapat balasan seperti sebelumnya.
+  if (isGroup && !TRIGGER_REGEX.test(text)) return;
+
+  const id = message.key.id;
+  if (id && processedMessages.has(id)) return;
+  if (id) {
+    processedMessages.add(id);
+    if (processedMessages.size > 1000) {
+      processedMessages.delete(processedMessages.values().next().value);
+    }
+  }
+
+  const historyKey = getHistoryKey(jid, sender);
+  const prompt = isGroup
+    ? text.replace(TRIGGER_REGEX, "").trim() ||
+      "Halo VEBS, sapa grup dengan singkat."
+    : text;
+
+  const previous = messageQueue.get(historyKey) || Promise.resolve();
+  const current = previous.catch(() => {}).then(async () => {
+    try {
+      console.log(`[${BOT_NAME}] Pesan ${isGroup ? "grup" : "pribadi"} diterima.`);
+      const answer = await askGemini(historyKey, prompt, isGroup);
+
+      if (sock && connected) {
+        await sock.sendMessage(jid, { text: answer });
+        console.log(`[${BOT_NAME}] Balasan berhasil dikirim.`);
       }
-    });
+    } catch (error) {
+      console.error("Message handling error:", JSON.stringify({
+        message: error.message,
+        status: error.status || error.code || null
+      }));
 
-  messageQueue.set(jid, current);
+      if (sock && connected) {
+        await sock.sendMessage(jid, {
+          text: "Maaf, VEBS sedang mengalami kendala. Coba lagi sebentar ya."
+        }).catch((sendError) => {
+          console.error("WhatsApp send error:", sendError.message);
+        });
+      }
+    }
+  });
+
+  messageQueue.set(historyKey, current);
   await current;
-  if (messageQueue.get(jid) === current) messageQueue.delete(jid);
+  if (messageQueue.get(historyKey) === current) messageQueue.delete(historyKey);
 }
 
 async function connectWhatsApp() {
-  if (isStarting || loggedOut) return;
-  isStarting = true;
+  if (starting || loggedOut) return;
+  starting = true;
 
   try {
     fs.mkdirSync(AUTH_DIR, { recursive: true });
@@ -201,68 +245,59 @@ async function connectWhatsApp() {
     sock.ev.on("connection.update", ({ connection, lastDisconnect, qr }) => {
       if (qr) {
         latestQR = qr;
-        console.log("QR baru tersedia. Buka halaman /qr dengan token yang benar.");
+        console.log("QR tersedia di halaman /qr.");
       }
 
       if (connection === "open") {
         connected = true;
         latestQR = null;
-        console.log(`${BOT_NAME} berhasil terhubung ke WhatsApp.`);
+        starting = false;
+        console.log(`${BOT_NAME} terhubung ke WhatsApp.`);
+        console.log(`${BOT_NAME} siap merespons sebutan vebs di grup.`);
       }
 
       if (connection === "close") {
         connected = false;
+        starting = false;
         const code = lastDisconnect?.error?.output?.statusCode;
 
         if (code === DisconnectReason.loggedOut) {
           loggedOut = true;
           latestQR = null;
-          console.error("Sesi WhatsApp logout. Perlu menautkan ulang secara manual.");
+          console.error("WhatsApp logout. Hubungkan ulang secara manual.");
           return;
         }
 
-        console.log("Koneksi terputus; mencoba reconnect dalam 5 detik.");
+        console.log("WhatsApp terputus. Mencoba reconnect dalam 5 detik.");
         clearTimeout(reconnectTimer);
         reconnectTimer = setTimeout(() => {
-          isStarting = false;
-          connectWhatsApp().catch((error) => {
-            console.error("Reconnect error:", error.message);
-          });
+          connectWhatsApp().catch((error) => console.error("Reconnect error:", error.message));
         }, 5000);
       }
-
-      if (connection === "open") isStarting = false;
     });
 
     sock.ev.on("messages.upsert", async ({ messages, type }) => {
       if (type !== "notify") return;
-      for (const message of messages) {
-        await processIncomingMessage(message);
-      }
+      for (const message of messages) await handleMessage(message);
     });
   } catch (error) {
+    starting = false;
     console.error("WhatsApp startup error:", error.message);
     clearTimeout(reconnectTimer);
     reconnectTimer = setTimeout(() => {
-      isStarting = false;
-      connectWhatsApp().catch((err) => console.error(err.message));
+      connectWhatsApp().catch((err) => console.error("Reconnect error:", err.message));
     }, 10000);
-  } finally {
-    // The connection.update handler controls isStarting after a successful start.
-    if (!sock) isStarting = false;
   }
 }
 
 const server = app.listen(PORT, "0.0.0.0", () => {
   console.log(`${BOT_NAME} server berjalan pada port ${PORT}`);
-  connectWhatsApp().catch((error) => console.error(error.message));
+  connectWhatsApp().catch((error) => console.error("Connection error:", error.message));
 });
 
-process.on("SIGTERM", () => {
+function shutdown() {
   clearTimeout(reconnectTimer);
   server.close(() => process.exit(0));
-});
-process.on("SIGINT", () => {
-  clearTimeout(reconnectTimer);
-  server.close(() => process.exit(0));
-});
+}
+process.on("SIGTERM", shutdown);
+process.on("SIGINT", shutdown);

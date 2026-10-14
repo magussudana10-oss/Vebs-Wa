@@ -1,9 +1,9 @@
 {
   "name": "vebs-whatsapp-bot",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
-  "description": "VEBS WhatsApp AI Bot powered by Gemini",
+  "description": "VEBS WhatsApp group AI bot powered by Gemini",
   "engines": {
     "node": ">=20"
   },
