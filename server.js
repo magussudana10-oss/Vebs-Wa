@@ -14,6 +14,7 @@ app.disable("x-powered-by");
 const PORT = Number(process.env.PORT || 3000);
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.8-flash";
+const GEMINI_FALLBACK_MODEL = process.env.GEMINI_FALLBACK_MODEL || "";
 const QR_PAGE_TOKEN = process.env.QR_PAGE_TOKEN;
 const AUTH_DIR = process.env.AUTH_DIR || "/data/auth";
 
@@ -123,6 +124,68 @@ function getHistoryKey(jid, sender) {
   return jid.endsWith("@g.us") ? `${jid}:${sender}` : jid;
 }
 
+function isRetryableGeminiError(error) {
+  const status = Number(error?.status || error?.code || error?.error?.code);
+  const message = String(error?.message || "");
+  return [429, 500, 502, 503, 504].includes(status) ||
+    /high demand|temporarily unavailable|try again later|UNAVAILABLE|overloaded/i.test(message);
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function generateGeminiResponse(contents, isGroup) {
+  const models = [GEMINI_MODEL];
+  if (GEMINI_FALLBACK_MODEL && GEMINI_FALLBACK_MODEL !== GEMINI_MODEL) {
+    models.push(GEMINI_FALLBACK_MODEL);
+  }
+
+  let lastError;
+
+  for (const model of models) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const response = await ai.models.generateContent({
+          model,
+          contents,
+          config: {
+            systemInstruction: `
+Kamu adalah VEBS, asisten AI WhatsApp yang ramah, cerdas, santai, dan membantu.
+Gunakan bahasa Indonesia kecuali pengguna meminta bahasa lain.
+Jawab dengan jelas, relevan, dan jujur. Jangan mengarang fakta.
+${isGroup
+  ? "Kamu menjawab di grup WhatsApp. Buat jawaban ringkas, sopan, dan cocok dibaca semua anggota."
+  : "Kamu menjawab chat pribadi WhatsApp."}
+            `.trim(),
+            temperature: 0.7,
+            maxOutputTokens: 800
+          }
+        });
+
+        const answer = response.text?.trim();
+        if (!answer) throw new Error("Gemini tidak menghasilkan jawaban.");
+        console.log(`[VEBS] Gemini berhasil menjawab dengan model ${model}.`);
+        return { answer, model };
+      } catch (error) {
+        lastError = error;
+        console.error(
+          `[VEBS] Gemini ${model}, percobaan ${attempt + 1}/3 gagal:`,
+          JSON.stringify({
+            message: error.message,
+            status: error.status || error.code || null
+          })
+        );
+
+        if (!isRetryableGeminiError(error)) break;
+        if (attempt < 2) await sleep(1200 * (2 ** attempt));
+      }
+    }
+  }
+
+  throw lastError || new Error("Semua percobaan Gemini gagal.");
+}
+
 async function askGemini(historyKey, userText, isGroup) {
   const history = histories.get(historyKey) || [];
   const contents = [
@@ -130,25 +193,7 @@ async function askGemini(historyKey, userText, isGroup) {
     { role: "user", parts: [{ text: userText }] }
   ];
 
-  const response = await ai.models.generateContent({
-    model: GEMINI_MODEL,
-    contents,
-    config: {
-      systemInstruction: `
-Kamu adalah VEBS, asisten AI WhatsApp yang ramah, cerdas, santai, dan membantu.
-Gunakan bahasa Indonesia kecuali pengguna meminta bahasa lain.
-Jawab dengan jelas, relevan, dan jujur. Jangan mengarang fakta.
-${isGroup
-  ? "Kamu menjawab di grup WhatsApp. Buat jawaban ringkas, sopan, dan cocok dibaca semua anggota."
-  : "Kamu menjawab chat pribadi WhatsApp."}
-      `.trim(),
-      temperature: 0.7,
-      maxOutputTokens: 800
-    }
-  });
-
-  const answer = response.text?.trim();
-  if (!answer) throw new Error("Gemini tidak menghasilkan jawaban.");
+  const { answer } = await generateGeminiResponse(contents, isGroup);
 
   histories.set(historyKey, [
     ...contents,
@@ -196,7 +241,7 @@ async function handleMessage(message) {
   const previous = messageQueue.get(historyKey) || Promise.resolve();
   const current = previous.catch(() => {}).then(async () => {
     try {
-      console.log(`[${BOT_NAME}] Pesan ${isGroup ? "grup" : "pribadi"} diterima.`);
+      console.log(`[${BOT_NAME}] Pesan ${isGroup ? "grup" : "pribadi"} diterima; target=${isGroup ? "group" : "private"}.`);
       const answer = await askGemini(historyKey, prompt, isGroup);
 
       if (sock && connected) {

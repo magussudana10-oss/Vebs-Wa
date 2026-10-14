@@ -15,10 +15,14 @@ Bot WhatsApp berbasis Baileys dengan Gemini AI.
 
 ## Railway Variables
 - `GEMINI_API_KEY`: API key Gemini (rahasia)
-- `GEMINI_MODEL`: model Gemini yang sudah berhasil digunakan di deployment Anda
+- `GEMINI_MODEL`: model Gemini utama yang sudah tersedia untuk API key Anda
+- `GEMINI_FALLBACK_MODEL`: opsional; model cadangan yang sudah dipastikan tersedia untuk API key Anda. Jika model utama mendapat 503/429/5xx, VEBS mencoba ulang lalu mencoba model cadangan.
 - `QR_PAGE_TOKEN`: token rahasia untuk membuka halaman QR
 - `AUTH_DIR`: `/data/auth` jika Railway Volume dipasang pada `/data`
 - `PORT`: disediakan oleh Railway
+
+## Penanganan error Gemini
+Kode mencoba ulang error sementara (503/429/5xx) hingga tiga kali per model. Jika memakai `GEMINI_FALLBACK_MODEL`, pastikan nama model cadangan benar-benar tersedia untuk API key Anda.
 
 ## Deploy
 1. Ekstrak ZIP.
