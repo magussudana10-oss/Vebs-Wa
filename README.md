@@ -1,4 +1,4 @@
-# VEBS AI Agent — RM Jawa Timur 5 (v2.2.0)
+# VEBS AI Agent — RM Jawa Timur 5 (v2.2.3)
 
 Paket ini merupakan upgrade inkremental dari versi yang diberikan. Integrasi WhatsApp Baileys, Gemini, endpoint QR/status, mekanisme retry/fallback, serta logika analisis Excel dipertahankan. Upgrade utama adalah instruksi AI khusus sebagai asisten pribadi Magus Sudana dan penyimpanan konteks percakapan secara persisten.
 
@@ -59,9 +59,29 @@ Memori:
 - `node --check` memeriksa sintaks saja; tetap lakukan pengujian fungsional di Railway sebelum mengganti produksi.
 
 
-## Scope-aware Excel analysis (v2.2.0)
+## Scope-aware Excel analysis (v2.2.2)
 - Excel caption/perintah dapat meminta satu Area, Branch, atau Point saja, misalnya `VEBS analisa Area Jember saja`.
 - Jika `area_name` tersedia, filter area diterapkan sebelum perhitungan KPI sehingga area lain tidak masuk hasil. Jika tidak ada area yang diminta, seluruh file tetap dianalisis.
 - Jika nama scope tidak bisa dipastikan dari kolom yang tersedia, VEBS memberi pesan bahwa scope tidak ditemukan; tidak diam-diam mengganti ke area lain.
 - Logika KPI yang ada tetap dipertahankan: bucket dari `dpd_old`, paid dari `payment_min_1x=Yes`, `loan_id` unik, dan restru dikecualikan.
 - Filter scope dari caption hanya berlaku untuk analisis lampiran Excel; perintah teks tanpa lampiran tetap dijawab oleh Gemini sesuai konteks.
+
+
+## Scope filtering v2.2.2
+- Column headers are normalized to recognize variants such as `Area Name`, `area_name`, `Branch Name`, and `branch_name`.
+- An explicit area/branch/point command can be placed in the Excel caption or sent as a separate text message immediately before the file in the same chat. The instruction expires after 30 minutes and is consumed by the next Excel attachment.
+- When a scope is explicitly requested but cannot be matched, VEBS returns an error instead of silently analyzing the entire file.
+- This change has passed JavaScript syntax validation; live WhatsApp/Railway and production Excel tests are still required.
+
+
+## Perbaikan v2.2.2 — filter scope ketat
+
+- Perintah area mencoba mencocokkan `area_name`, lalu nama area yang tertulis pada `branch_name`/`point_name`.
+- Caption umum tidak menghapus instruksi scope yang dikirim sebelumnya di chat yang sama.
+- Perhitungan KPI dilakukan setelah penyaringan scope.
+- Jika nama scope tidak ditemukan, VEBS mengirim pesan error dan tidak mengirim seluruh regional sebagai pengganti.
+- Tetap uji dengan file aktual sebelum dipakai untuk keputusan bisnis; pemeriksaan sintaks tidak menjamin seluruh variasi workbook sudah tercakup.
+
+
+## Revisi v2.2.3 — gaya respons WhatsApp
+Versi ini hanya merevisi system prompt untuk gaya komunikasi: lebih natural, santai, personal, ringkas, menyesuaikan chat pribadi/grup, dan jujur saat data tidak tersedia. Fungsi pemrosesan Excel, scope filter, perhitungan KPI, koneksi Baileys/WhatsApp, QR, endpoint, memori, retry/fallback, dan environment variables tidak sengaja diubah. Jika pengguna bertanya langsung tentang identitas sistem, VEBS harus menjawab jujur dan tidak mengaku sebagai manusia sungguhan.

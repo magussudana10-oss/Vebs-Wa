@@ -98,6 +98,9 @@ loadPersistentMemory();
 
 const messageQueue = new Map();
 const processedMessages = new Set();
+// Scope commands sent as a separate text message can apply to the next Excel file in the same chat.
+const pendingScopeRequests = new Map();
+const SCOPE_REQUEST_TTL_MS = 30 * 60 * 1000;
 
 // Model fallback otomatis: jika model utama overload/503, VEBS mencoba model stabil lain.
 // Urutannya bisa disesuaikan melalui GEMINI_MODEL dan GEMINI_FALLBACK_MODEL di Railway.
@@ -228,28 +231,43 @@ async function generateWithModel(contents, model, isGroup) {
         contents,
         config: {
           systemInstruction: `
-Kamu adalah VEBS, AI Agent pribadi untuk membantu pekerjaan Relationship Manager (RM) Regional Jawa Timur 5.
+Kamu adalah Vebs, asisten pribadi yang aktif di WhatsApp untuk membantu Magus Sudana, RM Regional Jawa Timur 5.
 
-PERAN DAN CARA BERPIKIR:
-- Bertindak seperti rekan kerja analis bisnis yang kritis, proaktif dalam analisis, praktis, dan komunikatif; bukan chatbot yang hanya memberi jawaban umum.
-- Gunakan bahasa Indonesia yang natural, profesional tetapi santai. Jawab sesuai pertanyaan dan konteks percakapan sebelumnya.
-- Pahami konteks kerja: repayment/collection, portfolio quality, Current/DPD 0, DPD 1–30, DPD 31–60, DPD 61–90, RR, Paid, NOA, GAP, movement/flow bucket, Area, Point/Branch, BP, dan Majelis.
-- Target KPI acuan bila relevan: Current/DPD 0 = 98%, DPD 1–30 = 55%, DPD 31–60 = 15%, DPD 61–90 = 7%. Jangan menganggap angka ini sebagai hasil aktual.
-- Saat diminta menganalisis, susun jawaban: (1) kesimpulan utama, (2) angka/fakta yang tersedia, (3) penyebab atau risiko yang bisa didukung data, (4) prioritas tindakan yang konkret, (5) data tambahan yang diperlukan jika ada kekurangan.
-- Prioritaskan dampak bisnis, GAP terhadap target, risiko kenaikan bucket, potensi recovery, serta tindakan yang bisa dilakukan RM, Area, Point, dan BP.
-- Jika data file atau angka aktual belum diberikan atau tidak tersedia dalam konteks, katakan secara eksplisit. Jangan mengarang pencapaian, nama Area/Point/BP, penyebab, maupun tren.
-- Bedakan fakta dari dugaan. Jika membuat dugaan, beri label sebagai hipotesis dan sebutkan data yang perlu diperiksa.
-- Jangan menyatakan sudah membaca file, mengirim laporan, mengubah data, memantau sistem, atau menjalankan tindakan eksternal kecuali benar-benar dilakukan oleh tool yang tersedia.
-- Untuk permintaan rumus atau perhitungan, jelaskan basis perhitungan secara ringkas dan konsisten. Jika definisi KPI ambigu, tanyakan klarifikasi daripada diam-diam mengubah definisi.
-- Identitas: kamu adalah VEBS, asisten AI pribadi Magus Sudana, RM Regional Jawa Timur 5. Magus adalah pengambil keputusan; kamu memberi analisis, pilihan, risiko, dan rekomendasi, bukan mengaku telah melakukan tindakan yang belum dijalankan.
-- Untuk pertanyaan RM, prioritaskan format ringkas: Ringkasan Eksekutif, Fakta/KPI, Risiko atau akar masalah yang didukung data, Prioritas 1–3, dan langkah tindak lanjut.
-- Jika konteks percakapan sebelumnya relevan, gunakan untuk memahami pertanyaan lanjutan. Jangan mencampur konteks antar-pengirim atau membocorkan percakapan pribadi ke grup.
-- Saat membandingkan performa, periksa penyebut, periode, cutoff, definisi Paid/RR, dan target. Jelaskan jika perbandingan tidak sebanding.
-- Untuk Excel repayment, hormati aturan yang sudah ditetapkan sistem: bucket berdasarkan dpd_old, restru dikecualikan, Paid berdasarkan payment_min_1x=Yes, loan_id unik; jangan mengubah aturan tersebut secara diam-diam.
-- Berikan tindakan yang spesifik dan dapat dijalankan: siapa/level mana yang perlu fokus, indikator yang perlu diverifikasi, dan ukuran keberhasilan. Jangan menyebut nama atau nilai yang tidak ada dalam data.
+TUGAS UTAMA:
+- Membuat laporan DPD dari setiap file Excel yang dikirim pengguna dan membantu membahas topik, menjawab pertanyaan, serta mengobrol secara natural di chat pribadi maupun grup WhatsApp.
+- Untuk file Excel, ikuti instruksi pengguna secara tepat. Jika pengguna meminta satu Area, Branch, Point, KPI, atau periode tertentu, jawab hanya sesuai ruang lingkup tersebut. Jangan menambahkan area atau data lain yang tidak diminta.
+- Jangan mengubah hasil, angka, maupun logika analisis Excel yang sudah ditetapkan oleh sistem. Jika data tidak tersedia atau permintaan tidak bisa dipastikan, jelaskan dengan singkat dan jujur.
+
+GAYA KOMUNIKASI DAN KEPRIBADIAN:
+- Berbicara santai, ramah, natural, fleksibel, dan terasa seperti percakapan manusia sehari-hari. Hindari gaya AI/bot/customer service yang kaku serta salam formal yang berlebihan.
+- Sesuaikan bahasa dengan lawan bicara: gunakan bahasa santai atau gaul yang wajar jika pengguna santai, dan bahasa sopan jika konteksnya formal.
+- Gunakan gaya pengetikan WhatsApp yang wajar. Singkatan seperti “yg”, “dgn”, “klo”, “tetep”, atau “gk” boleh digunakan bila cocok dengan konteks; jangan dipaksakan pada setiap jawaban.
+- Gunakan emoji seperlunya. Utamakan jawaban yang langsung ke inti dan tidak terlalu panjang, kecuali pengguna meminta penjelasan atau laporan terperinci.
+- Variasikan panjang kalimat dan jangan selalu memakai format laporan. Gunakan poin, tabel, atau ringkasan hanya jika memang membantu menjawab permintaan.
+
+CHAT PRIBADI:
+- Bersikap hangat dan personal, seperti rekan dekat sekaligus asisten pribadi yang siap membantu.
+- Gunakan konteks percakapan sebelumnya yang relevan agar percakapan mengalir. Jangan mengulang pertanyaan yang sudah terjawab di konteks.
+- Jika pengguna meminta analisis bisnis/RM, berikan angka dan fakta yang tersedia, gap/risiko yang didukung data, serta tindakan yang relevan. Jangan memaksakan format analisis jika pengguna hanya sedang mengobrol.
+
+GRUP WHATSAPP:
+- Tanggapi dengan natural, singkat, dan tidak mengganggu obrolan anggota lain.
+- Jawab saat dipanggil, diajak bicara, atau pesan memang relevan dengan VEBS. Jangan menyela atau membalas setiap obrolan antaranggota secara bertubi-tubi.
+- Jaga privasi: jangan membawa isi percakapan pribadi ke grup atau membagikan konteks milik pengirim lain.
+
+KEJUJURAN DAN BATASAN:
+- Jika tidak tahu, katakan dengan santai dan jujur, misalnya: “Wah, aku belum bisa memastikan soal itu. Perlu dicek dulu ya.” Jangan mengarang fakta, angka, sumber, atau tindakan yang belum dilakukan.
+- Jangan mengaku sudah membaca file, mengirim laporan, memeriksa sistem, atau melakukan tindakan eksternal jika tindakan itu belum benar-benar dilakukan.
+- Jangan mengaku sebagai manusia sungguhan jika ditanya secara langsung tentang identitas atau sifat sistem. Namun, jangan membahas identitas AI secara tidak perlu; fokuslah pada bantuan yang diminta.
 - Jangan pernah meminta atau mengungkap API key, token, password, QR rahasia, atau data autentikasi.
-${isGroup ? "KONTEKS: Kamu membalas di grup WhatsApp. Jawab ringkas, sopan, tidak membocorkan informasi privat dari percakapan pribadi, dan fokus pada pesan yang menyebut VEBS." : "KONTEKS: Kamu membalas chat pribadi RM. Kamu boleh memberi analisis lebih rinci, membuat prioritas kerja, dan melanjutkan konteks percakapan yang tersedia."}
-`, 
+
+ATURAN ANALISIS DPD/EXCEL YANG WAJIB DIPERTAHANKAN:
+- Target acuan bila relevan: Current/DPD 0 = 98%, DPD 1–30 = 55%, DPD 31–60 = 15%, dan DPD 61–90 = 7%. Target bukan angka aktual.
+- Bucket ditentukan berdasarkan dpd_old; restruktur dikecualikan; Paid ditentukan oleh payment_min_1x = Yes; loan_id dideduplikasi sesuai logika program.
+- Jangan mengubah definisi KPI, cara menghitung RR/Paid, atau aturan filter secara diam-diam. Jangan menebak angka atau nama Area/Branch/Point yang tidak ada pada data.
+- Jika scope tertentu diminta, tetap fokus pada scope tersebut dan jangan tampilkan scope lain sebagai tambahan.
+${isGroup ? "KONTEKS: Kamu membalas di grup WhatsApp. Respons ringkas dan natural; jaga privasi percakapan pribadi." : "KONTEKS: Kamu membalas chat pribadi. Lanjutkan konteks percakapan yang relevan dan sesuaikan panjang jawaban dengan permintaan pengguna."}
+`,
           temperature: 0.7,
           maxOutputTokens: 800
         }
@@ -356,28 +374,116 @@ function normalizeScopeText(value) {
     .toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 }
 
+function normalizeColumnName(value) {
+  return normalizeScopeText(value).replace(/\s+/g, "_");
+}
+
+function canonicalizeExcelRow(row) {
+  const aliases = {
+    loan_id: ["loan_id", "loan id", "loanid", "id loan"],
+    dpd_old: ["dpd_old", "dpd old", "dpd_old_bucket", "dpd old bucket"],
+    is_loan_restructured: ["is_loan_restructured", "is loan restructured", "loan restructured", "restructured"],
+    payment_min_1x: ["payment_min_1x", "payment min 1x", "payment_min1x", "paid"],
+    area_name: ["area_name", "area name", "area", "nama area", "nama_area"],
+    branch_name: ["branch_name", "branch name", "branch", "nama branch", "nama cabang", "cabang"],
+    point_name: ["point_name", "point name", "point", "nama point", "nama poin"],
+    dpd_new: ["dpd_new", "dpd new"],
+    movement_label: ["movement_label", "movement label"],
+    cutoff_bucket: ["cutoff_bucket", "cutoff bucket"],
+    loan_state: ["loan_state", "loan state"]
+  };
+  const normalized = new Map(Object.entries(row).map(([key, value]) => [normalizeColumnName(key), value]));
+  const output = { ...row };
+  for (const [canonical, variants] of Object.entries(aliases)) {
+    for (const variant of variants) {
+      const key = normalizeColumnName(variant);
+      if (normalized.has(key) && normalized.get(key) !== null && normalized.get(key) !== "") {
+        output[canonical] = normalized.get(key);
+        break;
+      }
+    }
+  }
+  return output;
+}
+
+function isExplicitScopeRequest(text) {
+  const request = normalizeScopeText(text);
+  const hasScopeWord = /\b(area|wilayah|branch|cabang|point|poin|titik)\b/.test(request);
+  const hasTargetWord = /\b(saja|only|khusus|hanya)\b/.test(request);
+  // A scope instruction is stored only when it names a scope dimension and target.
+  return hasScopeWord && (hasTargetWord || /\b(analisa|analisis|tampilkan|ambil|lihat|data|rr|dpd|gap)\b/.test(request));
+}
+
+function scopeTextContains(haystack, needle) {
+  const h = ` ${normalizeScopeText(haystack)} `;
+  const n = ` ${normalizeScopeText(needle)} `;
+  return n.trim().length >= 2 && h.includes(n);
+}
+
+function extractRequestedName(request, dimension) {
+  const normalized = normalizeScopeText(request);
+  const labels = dimension === "area" ? "area|wilayah" : dimension === "branch" ? "branch|cabang" : "point|poin|titik";
+  const match = normalized.match(new RegExp(`\\b(?:${labels})\\s+(.+)$`));
+  if (!match) return "";
+  return match[1]
+    .replace(/\b(?:saja|only|khusus|hanya|tolong|mohon|ya|dong|vebs|analisa|analisis|tampilkan|ambil|lihat|data|untuk|dengan|dan|pada|di|yang|rr|dpd|gap|current|bucket|loan|paid|mitra|cair|report|laporan)\b.*$/g, "")
+    .trim();
+}
+
 function resolveRequestedScope(rows, requestText) {
   const request = normalizeScopeText(requestText);
-  if (!request) return { type: "all", value: "" };
-  // Filter only when the request explicitly asks for a single area/branch/point.
-  const asksScope = /\b(area|wilayah|branch|cabang|point|poin|titik)\b/.test(request) ||
-    /\b(saja|only|khusus|hanya)\b/.test(request);
-  if (!asksScope) return { type: "all", value: "" };
+  if (!request) return { type: "all", value: "", matchMode: "no-scope-request" };
 
-  const areaValues = [...new Set(rows.map(row => String(row.area_name ?? "").trim()).filter(Boolean))]
-    .sort((a, b) => b.length - a.length);
-  const branchValues = [...new Set(rows.map(row => String(row.branch_name ?? row.point_name ?? "").trim()).filter(Boolean))]
-    .sort((a, b) => b.length - a.length);
-  const findMention = (values) => values.find(value => {
-    const normalized = normalizeScopeText(value);
-    if (!normalized || normalized.length < 2) return false;
-    return (` ${request} `).includes(` ${normalized} `);
-  });
-  const area = findMention(areaValues);
-  if (area) return { type: "area", value: area };
-  const branch = findMention(branchValues);
-  if (branch) return { type: "branch", value: branch };
-  return { type: "not_found", value: "" };
+  const asksArea = /\b(area|wilayah)\b/.test(request);
+  const asksBranch = /\b(branch|cabang)\b/.test(request);
+  const asksPoint = /\b(point|poin|titik)\b/.test(request);
+  const asksSingleScope = asksArea || asksBranch || asksPoint || /\b(saja|only|khusus|hanya)\b/.test(request);
+  if (!asksSingleScope) return { type: "all", value: "", matchMode: "no-scope-request" };
+
+  const distinct = (field) => [...new Set(rows.map(row => String(row[field] ?? "").trim()).filter(Boolean))];
+  const areas = distinct("area_name").sort((a, b) => b.length - a.length);
+  const branches = distinct("branch_name").sort((a, b) => b.length - a.length);
+  const points = distinct("point_name").sort((a, b) => b.length - a.length);
+  const exactMention = (values) => values.find(value => scopeTextContains(request, value));
+
+  // Prefer a literal name already present in the relevant Excel column.
+  if (asksArea) {
+    const exactArea = exactMention(areas);
+    if (exactArea) return { type: "area", value: exactArea, matchMode: "exact-area-column" };
+  }
+  if (asksPoint) {
+    const exactPoint = exactMention(points);
+    if (exactPoint) return { type: "point", value: exactPoint, matchMode: "exact-point-column" };
+  }
+  if (asksBranch || asksArea) {
+    const exactBranch = exactMention(branches);
+    if (exactBranch) return { type: "branch", value: exactBranch, matchMode: "exact-branch-column" };
+  }
+
+  // Handle shorthand such as "Area Jember saja" when area_name is blank or
+  // the workbook records the area only inside branch_name / point_name.
+  const dimension = asksArea ? "area" : asksPoint ? "point" : "branch";
+  let requestedName = extractRequestedName(requestText, dimension);
+  if (!requestedName && dimension !== "area") requestedName = extractRequestedName(requestText, "area");
+  requestedName = normalizeScopeText(requestedName);
+  if (requestedName.length >= 2) {
+    const rowMatches = rows.filter(row => {
+      const area = normalizeScopeText(row.area_name);
+      const branch = normalizeScopeText(row.branch_name);
+      const point = normalizeScopeText(row.point_name);
+      if (dimension === "area") {
+        return area === requestedName || area.startsWith(`${requestedName} `) ||
+          branch === requestedName || branch.startsWith(`${requestedName} `) || branch.includes(` ${requestedName} `) ||
+          point === requestedName || point.startsWith(`${requestedName} `) || point.includes(` ${requestedName} `);
+      }
+      const value = dimension === "point" ? point : branch;
+      return value === requestedName || value.startsWith(`${requestedName} `) || value.includes(` ${requestedName} `);
+    });
+    if (rowMatches.length) {
+      return { type: dimension, value: requestedName, matchMode: "name-derived-from-area-branch-point" };
+    }
+  }
+  return { type: "not_found", value: requestedName || "", matchMode: "scope-not-found" };
 }
 
 function parseRepaymentWorkbook(buffer, fileName, requestText = "") {
@@ -388,9 +494,10 @@ function parseRepaymentWorkbook(buffer, fileName, requestText = "") {
 
   for (const sheetName of workbook.SheetNames) {
     const sheet = workbook.Sheets[sheetName];
-    const candidate = XLSX.utils.sheet_to_json(sheet, { defval: null, raw: true });
-    if (!candidate.length) continue;
-    const headers = Object.keys(candidate[0]).map(key => key.trim().toLowerCase());
+    const rawCandidate = XLSX.utils.sheet_to_json(sheet, { defval: null, raw: true });
+    if (!rawCandidate.length) continue;
+    const candidate = rawCandidate.map(canonicalizeExcelRow);
+    const headers = Object.keys(candidate[0]).map(normalizeColumnName);
     if (required.every(key => headers.includes(key))) {
       rows = candidate;
       sheetUsed = sheetName;
@@ -441,13 +548,26 @@ function parseRepaymentWorkbook(buffer, fileName, requestText = "") {
   const scope = resolveRequestedScope(rows, requestText);
   if (scope.type === "not_found") {
     const knownAreas = [...new Set(rows.map(row => String(row.area_name ?? "").trim()).filter(Boolean))];
-    throw new Error(`Area/branch yang diminta tidak ditemukan secara pasti. Contoh area pada file: ${knownAreas.slice(0, 12).join(", ") || "kolom area_name tidak tersedia"}. Sebutkan nama area/branch sesuai data Excel.`);
+    const knownBranches = [...new Set(rows.map(row => String(row.branch_name ?? row.point_name ?? "").trim()).filter(Boolean))];
+    throw new Error(`Filter ${scope.value || "area/branch/point"} tidak cocok dengan data Excel. Tidak ada data seluruh regional yang dikirim sebagai pengganti. Contoh area: ${knownAreas.slice(0, 8).join(", ") || "kolom area_name kosong"}. Contoh branch/point: ${knownBranches.slice(0, 8).join(", ") || "kolom branch_name/point_name kosong"}.`);
   }
+  const matchesScopeName = (value, target) => {
+    const normalizedValue = normalizeScopeText(value);
+    const normalizedTarget = normalizeScopeText(target);
+    return Boolean(normalizedTarget) && (
+      normalizedValue === normalizedTarget ||
+      normalizedValue.startsWith(`${normalizedTarget} `) ||
+      normalizedValue.includes(` ${normalizedTarget} `) ||
+      normalizedValue.endsWith(` ${normalizedTarget}`)
+    );
+  };
   const allLoans = scope.type === "area"
-    ? allLoansUnfiltered.filter(loan => normalizeScopeText(loan.area) === normalizeScopeText(scope.value))
+    ? allLoansUnfiltered.filter(loan => matchesScopeName(loan.area, scope.value) || matchesScopeName(loan.branch, scope.value) || matchesScopeName(loan.point, scope.value))
     : scope.type === "branch"
-      ? allLoansUnfiltered.filter(loan => normalizeScopeText(loan.branch) === normalizeScopeText(scope.value) || normalizeScopeText(loan.point) === normalizeScopeText(scope.value))
-      : allLoansUnfiltered;
+      ? allLoansUnfiltered.filter(loan => matchesScopeName(loan.branch, scope.value) || matchesScopeName(loan.point, scope.value))
+      : scope.type === "point"
+        ? allLoansUnfiltered.filter(loan => matchesScopeName(loan.point, scope.value))
+        : allLoansUnfiltered;
   if (scope.type !== "all" && !allLoans.length) {
     throw new Error(`Tidak ada loan yang cocok dengan ${scope.type} ${scope.value} setelah deduplikasi loan_id.`);
   }
@@ -574,9 +694,20 @@ async function processExcelAttachment(message, jid, fileInfo, isGroup) {
     const buffer = Buffer.isBuffer(media) ? media : Buffer.from(media);
     if (!buffer.length) throw new Error("File Excel kosong atau gagal diunduh.");
     if (buffer.length > 20 * 1024 * 1024) throw new Error("Ukuran file melebihi batas 20 MB.");
-    const requestText = extractText(message);
+    const captionText = extractText(message);
+    const pending = pendingScopeRequests.get(jid);
+    const pendingIsFresh = Boolean(pending && (Date.now() - pending.timestamp) <= SCOPE_REQUEST_TTL_MS);
+    const captionHasScope = isExplicitScopeRequest(captionText);
+    // A generic caption (e.g. "VEBS" or "file Oktober") must not erase
+    // a specific scope instruction sent immediately before the attachment.
+    const requestText = captionHasScope
+      ? captionText
+      : (pendingIsFresh ? pending.text : captionText);
+    if (pending && !pendingIsFresh) pendingScopeRequests.delete(jid);
+    console.log(`[EXCEL] Scope request source=${captionHasScope ? "caption" : (pendingIsFresh ? "pesan-terakhir" : (captionText ? "caption-no-scope" : "tidak-ada"))}; scopeInstruction=${Boolean(requestText)}; explicitScope=${isExplicitScopeRequest(requestText)}`);
     const report = parseRepaymentWorkbook(buffer, fileInfo.fileName, requestText);
-    console.log(`[EXCEL] Analisis selesai: ${report.rowCount} baris, sheet=${report.sheetUsed}.`);
+    if (pendingIsFresh) pendingScopeRequests.delete(jid);
+    console.log(`[EXCEL] Analisis selesai: ${report.rowCount} baris, sheet=${report.sheetUsed}, scope=${report.scope.type}:${report.scope.value || "-"}.`);
     await sendText(jid, report.text);
     console.log(`[EXCEL] Report terkirim. mime=${mediaType}; bytes=${buffer.length}.`);
   } catch (error) {
@@ -622,8 +753,15 @@ async function handleMessage(message) {
     console.log("[WA IN] Pesan diabaikan: tidak ada teks/caption yang bisa diproses.");
     return;
   }
+  // Remember an explicit scope command sent as a separate message before the Excel attachment.
+  // This is chat-scoped and expires after 30 minutes; it is consumed by the next file.
+  if (isExplicitScopeRequest(text)) {
+    pendingScopeRequests.set(jid, { text, timestamp: Date.now() });
+    console.log(`[EXCEL] Scope instruction saved for next attachment in this chat; chars=${text.length}.`);
+  }
+
   if (/^(vebs\s+)?(excel analysis|analisa excel|analisis excel|mode excel)$/i.test(text.trim())) {
-    await sendText(jid, "📊 Mode Excel Analysis aktif. Kirim file Excel (.xlsx/.xls/.csv). Jika ingin membatasi hasil, tulis nama Area/Branch/Point dan kata 'saja' pada caption/perintah, misalnya: VEBS analisa Area Jember saja. Jika tidak ada scope yang disebutkan, VEBS menganalisis seluruh file. Target Current 98%, DPD 1–30 55%, DPD 31–60 15%, DPD 61–90 7%; RR berdasarkan payment_min_1x=Yes, restru dikecualikan.");
+    await sendText(jid, "📊 Mode Excel Analysis aktif. Kirim file Excel (.xlsx/.xls/.csv). Untuk membatasi hasil, tulis perintah di caption file atau kirim perintah scope lalu file dalam chat yang sama dalam 30 menit, misalnya: VEBS analisa Area Jember saja. Jika scope disebutkan tetapi tidak cocok dengan data, VEBS akan memberi error dan tidak mengirim seluruh data sebagai pengganti. Target Current 98%, DPD 1–30 55%, DPD 31–60 15%, DPD 61–90 7%; RR berdasarkan payment_min_1x=Yes, restru dikecualikan.");
     return;
   }
   if (isGroup && !GROUP_TRIGGER_REGEX.test(text)) return;
