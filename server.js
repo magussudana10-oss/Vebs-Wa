@@ -9,6 +9,7 @@ import makeWASocket, {
 import { GoogleGenAI } from "@google/genai";
 import * as XLSX from "xlsx";
 import fs from "node:fs";
+import path from "node:path";
 
 const app = express();
 app.disable("x-powered-by");
@@ -19,6 +20,10 @@ const GEMINI_MODEL = (process.env.GEMINI_MODEL || "gemini-3.8-flash").trim();
 const GEMINI_FALLBACK_MODEL = (process.env.GEMINI_FALLBACK_MODEL || "").trim();
 const QR_PAGE_TOKEN = process.env.QR_PAGE_TOKEN;
 const AUTH_DIR = process.env.AUTH_DIR || "/data/auth";
+// Memory is stored separately from WhatsApp credentials. Keep /data on a Railway Volume.
+const MEMORY_PATH = process.env.VEBS_MEMORY_PATH || "/data/vebs-memory.json";
+const MEMORY_ENABLED = String(process.env.VEBS_MEMORY_ENABLED || "true").toLowerCase() !== "false";
+const MAX_MEMORY_CHATS = 100;
 
 const BOT_NAME = "VEBS";
 const GROUP_TRIGGER_REGEX = /\bvebs\b/i;
@@ -42,6 +47,55 @@ let acceptedMessageCount = 0;
 let lastIncomingAt = null;
 
 const histories = new Map();
+// Load recent conversation context from persistent storage so a Railway restart
+// does not automatically erase all assistant context.
+function loadPersistentMemory() {
+  if (!MEMORY_ENABLED) {
+    console.log("[MEMORY] Persistent memory disabled by VEBS_MEMORY_ENABLED=false.");
+    return;
+  }
+  try {
+    if (!fs.existsSync(MEMORY_PATH)) {
+      console.log("[MEMORY] No saved memory yet; starting with empty context.");
+      return;
+    }
+    const parsed = JSON.parse(fs.readFileSync(MEMORY_PATH, "utf8"));
+    const entries = Object.entries(parsed?.histories || {}).slice(-MAX_MEMORY_CHATS);
+    for (const [key, messages] of entries) {
+      if (Array.isArray(messages)) {
+        histories.set(key, messages.filter(item =>
+          item && ["user", "model"].includes(item.role) &&
+          Array.isArray(item.parts) && item.parts.every(part => typeof part?.text === "string")
+        ).slice(-MAX_HISTORY_MESSAGES));
+      }
+    }
+    console.log(`[MEMORY] Loaded context for ${histories.size} conversation(s).`);
+  } catch (error) {
+    console.error("[MEMORY] Saved memory could not be loaded; starting fresh:", error?.message || String(error));
+  }
+}
+
+function savePersistentMemory() {
+  if (!MEMORY_ENABLED) return;
+  try {
+    const parent = path.dirname(MEMORY_PATH);
+    fs.mkdirSync(parent, { recursive: true });
+    const entries = [...histories.entries()].slice(-MAX_MEMORY_CHATS);
+    const payload = JSON.stringify({
+      version: 1,
+      updatedAt: new Date().toISOString(),
+      histories: Object.fromEntries(entries)
+    });
+    const tempPath = `${MEMORY_PATH}.tmp`;
+    fs.writeFileSync(tempPath, payload, { mode: 0o600 });
+    fs.renameSync(tempPath, MEMORY_PATH);
+  } catch (error) {
+    console.error("[MEMORY] Could not save context:", error?.message || String(error));
+  }
+}
+
+loadPersistentMemory();
+
 const messageQueue = new Map();
 const processedMessages = new Set();
 
@@ -71,6 +125,9 @@ app.get("/status", (_req, res) => {
   res.json({
     bot: BOT_NAME,
     whatsapp: connected ? "connected" : "disconnected",
+    assistantRole: "Personal AI assistant for RM Magus Sudana, Regional Jawa Timur 5",
+    persistentMemory: MEMORY_ENABLED,
+    savedConversationContexts: histories.size,
     primaryGeminiModel: GEMINI_MODEL,
     fallbackGeminiModels: getGeminiModels().filter(model => model !== GEMINI_MODEL),
     groupTrigger: "vebs (case-insensitive)",
@@ -184,6 +241,12 @@ PERAN DAN CARA BERPIKIR:
 - Bedakan fakta dari dugaan. Jika membuat dugaan, beri label sebagai hipotesis dan sebutkan data yang perlu diperiksa.
 - Jangan menyatakan sudah membaca file, mengirim laporan, mengubah data, memantau sistem, atau menjalankan tindakan eksternal kecuali benar-benar dilakukan oleh tool yang tersedia.
 - Untuk permintaan rumus atau perhitungan, jelaskan basis perhitungan secara ringkas dan konsisten. Jika definisi KPI ambigu, tanyakan klarifikasi daripada diam-diam mengubah definisi.
+- Identitas: kamu adalah VEBS, asisten AI pribadi Magus Sudana, RM Regional Jawa Timur 5. Magus adalah pengambil keputusan; kamu memberi analisis, pilihan, risiko, dan rekomendasi, bukan mengaku telah melakukan tindakan yang belum dijalankan.
+- Untuk pertanyaan RM, prioritaskan format ringkas: Ringkasan Eksekutif, Fakta/KPI, Risiko atau akar masalah yang didukung data, Prioritas 1–3, dan langkah tindak lanjut.
+- Jika konteks percakapan sebelumnya relevan, gunakan untuk memahami pertanyaan lanjutan. Jangan mencampur konteks antar-pengirim atau membocorkan percakapan pribadi ke grup.
+- Saat membandingkan performa, periksa penyebut, periode, cutoff, definisi Paid/RR, dan target. Jelaskan jika perbandingan tidak sebanding.
+- Untuk Excel repayment, hormati aturan yang sudah ditetapkan sistem: bucket berdasarkan dpd_old, restru dikecualikan, Paid berdasarkan payment_min_1x=Yes, loan_id unik; jangan mengubah aturan tersebut secara diam-diam.
+- Berikan tindakan yang spesifik dan dapat dijalankan: siapa/level mana yang perlu fokus, indikator yang perlu diverifikasi, dan ukuran keberhasilan. Jangan menyebut nama atau nilai yang tidak ada dalam data.
 - Jangan pernah meminta atau mengungkap API key, token, password, QR rahasia, atau data autentikasi.
 ${isGroup ? "KONTEKS: Kamu membalas di grup WhatsApp. Jawab ringkas, sopan, tidak membocorkan informasi privat dari percakapan pribadi, dan fokus pada pesan yang menyebut VEBS." : "KONTEKS: Kamu membalas chat pribadi RM. Kamu boleh memberi analisis lebih rinci, membuat prioritas kerja, dan melanjutkan konteks percakapan yang tersedia."}
 `, 
@@ -222,6 +285,12 @@ async function askGemini(historyKey, userText, isGroup) {
         ...contents,
         { role: "model", parts: [{ text: answer }] }
       ].slice(-MAX_HISTORY_MESSAGES));
+      // Persist only successful conversational context; never write credentials or QR data.
+      if (histories.size > MAX_MEMORY_CHATS) {
+        const oldestKey = histories.keys().next().value;
+        if (oldestKey !== undefined) histories.delete(oldestKey);
+      }
+      savePersistentMemory();
       return answer;
     } catch (error) {
       lastError = error;
