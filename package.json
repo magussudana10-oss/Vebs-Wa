@@ -1,9 +1,9 @@
 {
   "name": "vebs-whatsapp-bot",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "private": true,
   "type": "module",
-  "description": "VEBS WhatsApp AI bot powered by Gemini with group trigger and diagnostics",
+  "description": "VEBS WhatsApp AI bot with group trigger and automatic Gemini fallback",
   "engines": { "node": ">=20" },
   "scripts": { "start": "node server.js" },
   "dependencies": {
