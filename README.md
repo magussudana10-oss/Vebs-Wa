@@ -1,87 +1,47 @@
-# VEBS AI Agent — RM Jawa Timur 5 (v2.2.3)
+# VEBS RM Jawa Timur 5 — v2.3.0 Auto Collection AMCOLL (Review Package)
 
-Paket ini merupakan upgrade inkremental dari versi yang diberikan. Integrasi WhatsApp Baileys, Gemini, endpoint QR/status, mekanisme retry/fallback, serta logika analisis Excel dipertahankan. Upgrade utama adalah instruksi AI khusus sebagai asisten pribadi Magus Sudana dan penyimpanan konteks percakapan secara persisten.
+Paket ini menambahkan fitur Auto Collection AMCOLL pada baseline VEBS v2.2.3. Fitur lama Excel DPD, KPI/Paid/restruktur, Baileys/QR, Gemini retry/fallback, dan perilaku chat tetap dipertahankan. Paket ini belum di-deploy dan belum diuji terhadap spreadsheet online karena akses Google Drive/Sheets langsung belum tersedia di sesi ini.
 
-## Fitur
-- Chat pribadi WhatsApp; balasan grup hanya jika teks/caption mengandung kata `VEBS`.
-- Identitas AI: VEBS adalah asisten pribadi Magus Sudana, RM Regional Jawa Timur 5.
-- Gaya analisis RM: ringkasan eksekutif, KPI/fakta, risiko yang didukung data, prioritas tindakan, dan tindak lanjut.
-- Memori konteks percakapan disimpan ke file JSON sehingga dapat bertahan saat service restart jika file berada di Railway persistent volume.
-- Konteks dibedakan per chat; konteks grup juga dipisahkan berdasarkan pengirim.
-- Analisis lampiran Excel `.xlsx`, `.xls`, `.xlsm`, dan `.csv`; seluruh file tanpa filter/scope area.
-- Target KPI: Current/DPD 0 = 98%; DPD 1–30 = 55%; DPD 31–60 = 15%; DPD 61–90 = 7%.
-- Bucket berdasarkan `dpd_old`; restruktur dikecualikan; Paid berdasarkan `payment_min_1x = Yes`; deduplikasi `loan_id`.
-- Movement tetap dibaca dari `movement_label` setelah restruktur dikecualikan.
-- Endpoint `/health`, `/status`, dan `/qr?token=...`.
-- Retry dan model fallback Gemini mengikuti konfigurasi.
+## Fitur tambahan
+- Membaca laporan WhatsApp dengan field `customer_name`, `customer_number`, `loan_id`, `nominal bayar`.
+- Diproses di chat pribadi atau grup (laporan terformat tidak wajib menyebut VEBS).
+- Validasi ketiga identitas terhadap sheet `Source`.
+- Tidak valid / ambigu: tidak menulis ke rekap dan memberi balasan kepada pengirim.
+- Duplikat: identitas Customer Number + Loan ID + nominal sama ditolak. Nominal berbeda untuk pasangan Customer Number + Loan ID yang sama diterima sebagai laporan baru.
+- Antrean FIFO global di VEBS dan `LockService` pada Apps Script.
+- Menyalin nilai baris Source kolom A:AC ke baris berikutnya pada `Data Collection Amcoll`, mengisi nominal di kolom AD, lalu memverifikasi nilai sebelum balasan berhasil.
+- Balasan berhasil mencantumkan nomor baris, ucapan terima kasih, dan penyemangat dengan nama pengirim.
+- Idempotency juga memakai WhatsApp message ID bila destination sheet sudah memiliki kolom `whatsapp_message_id`; deteksi duplikat nominal tetap aktif tanpa kolom tersebut.
 
-## Kolom wajib Excel
-`loan_id`, `dpd_old`, `is_loan_restructured`, `payment_min_1x`.
+## Bagian penting sebelum produksi
+1. Buka spreadsheet yang ditautkan, pastikan header `Source` memuat `customer_name`, `customer_number`, `loan_id` (spasi/underscore tidak masalah).
+2. Pastikan header kolom AD di `Data Collection Amcoll` adalah `nominal bayar`.
+3. Kode mengasumsikan data A:AC pada `Source` perlu disalin ke A:AC pada `Data Collection Amcoll`. Review dahulu jika struktur kedua sheet berbeda.
+4. Pastikan row 1 adalah header dan `Data Collection Amcoll` memiliki header `customer_name`, `customer_number`, `loan_id` untuk deduplikasi.
 
-Kolom tambahan untuk rincian cabang/movement: `branch_name` (atau `point_name`/`area_name`), `dpd_new`, `movement_label`, `cutoff_bucket`, `loan_state`.
+## Konfigurasi Google Apps Script
+1. Dari spreadsheet, buka **Extensions → Apps Script**.
+2. Buat file `Code.gs` atau ganti isinya dengan file `Code.gs` dari paket ini.
+3. Di **Project Settings → Script Properties**, tambahkan `VEBS_API_TOKEN` dengan token acak panjang yang Anda buat sendiri. Jangan kirim token ke chat.
+4. Jalankan fungsi apa pun yang memicu otorisasi atau deploy web app sesuai permintaan Google.
+5. Pilih **Deploy → New deployment → Web app**; execute as owner/developer. Batasi akses sesuai kebijakan akun. Endpoint publik harus tetap dilindungi token.
+6. Salin URL Web App yang berakhiran `/exec`.
 
-Batas file: 20 MB dan 250.000 baris.
+## Konfigurasi Railway (`Vebs-Wa`)
+Tambahkan variable: `AMCOLL_WEBAPP_URL` = URL `/exec` dan `AMCOLL_API_TOKEN` = nilai yang sama dengan Script Property `VEBS_API_TOKEN`. Simpan token hanya di Railway dan Apps Script Properties, bukan di kode/ChatGPT. Jangan mengubah `GEMINI_API_KEY`, `QR_PAGE_TOKEN`, `AUTH_DIR`, atau volume `/data/auth`.
 
-## Environment variables Railway
-Wajib:
-- `GEMINI_API_KEY`
-- `QR_PAGE_TOKEN`
+## Pengujian wajib sebelum deployment produksi
+- Laporan valid -> baris baru, AD berisi nominal, balasan mencantumkan nomor baris.
+- Tiap field identitas salah -> tidak ada penulisan.
+- Identitas + nominal sama -> duplikat, tidak ada baris baru.
+- Customer Number + Loan ID sama tetapi nominal berbeda -> baris baru.
+- Dua laporan valid berdekatan -> baris berurutan.
+- Pesan WhatsApp sama dikirim ulang -> tidak menulis dua kali.
+- Kegagalan endpoint/timeout -> VEBS tidak memberi konfirmasi berhasil.
 
-Pertahankan sesuai deployment:
-- `AUTH_DIR=/data/auth` jika volume sesi dipasang di `/data/auth`
-- `GEMINI_MODEL`
-- `GEMINI_FALLBACK_MODEL`
-- `PORT` (umumnya diberikan Railway)
+## Validasi paket yang dilakukan
+- `node --check server.js`
+- Validasi JSON `package.json`
+- Pemeriksaan sintaks sederhana `Code.gs` (perlu diuji final melalui Apps Script editor)
 
-Memori:
-- `VEBS_MEMORY_ENABLED=true` (default). Set `false` untuk menonaktifkan penyimpanan konteks.
-- `VEBS_MEMORY_PATH=/data/vebs-memory.json` (default). Pastikan lokasi ini berada di persistent volume jika memori harus bertahan saat restart.
-
-## Deploy dengan aman
-1. Backup kode repository dan catat environment variables saat ini.
-2. Ganti `server.js`, `package.json`, dan `README.md` dari paket ini.
-3. Commit ke branch produksi yang benar, lalu deploy commit itu di Railway.
-4. Jangan menghapus persistent volume `/data/auth`, jangan mengubah lokasi `AUTH_DIR`, dan jangan mengganti `GEMINI_API_KEY` atau `QR_PAGE_TOKEN`.
-5. Jika volume Railway dipasang di `/data`, file memori default `/data/vebs-memory.json` akan berada di volume yang sama tetapi terpisah dari kredensial WhatsApp.
-6. Setelah deploy, cek endpoint `/health` dan `/status`.
-7. Tes chat pribadi, tes grup dengan kata `VEBS`, lalu tes file Excel kecil.
-
-## Menggunakan analisis Excel
-- Chat pribadi: kirim file Excel langsung ke VEBS.
-- Grup: lampirkan file dan tulis kata `VEBS` di caption, misalnya `VEBS analisis excel`.
-
-## Batasan yang perlu diketahui
-- Memori persisten menyimpan teks percakapan dan jawaban AI pada disk. Batasi akses Railway dan jangan gunakan untuk menyimpan data rahasia seperti password, token, atau informasi autentikasi. Memori bukan sistem database terkelola; backup volume jika diperlukan.
-- Maksimum 100 konteks percakapan terbaru disimpan dan masing-masing memiliki batas riwayat sesuai konfigurasi.
-- Versi ini belum menjalankan laporan proaktif terjadwal. Untuk laporan otomatis, harus ditentukan sumber data, jadwal, dan aturan notifikasi terlebih dahulu.
-- `loan_state=CLOSED` tidak otomatis dikecualikan; aturan itu belum dikonfirmasi.
-- Hasil Excel bergantung pada kualitas data dan nama kolom sumber.
-- `node --check` memeriksa sintaks saja; tetap lakukan pengujian fungsional di Railway sebelum mengganti produksi.
-
-
-## Scope-aware Excel analysis (v2.2.2)
-- Excel caption/perintah dapat meminta satu Area, Branch, atau Point saja, misalnya `VEBS analisa Area Jember saja`.
-- Jika `area_name` tersedia, filter area diterapkan sebelum perhitungan KPI sehingga area lain tidak masuk hasil. Jika tidak ada area yang diminta, seluruh file tetap dianalisis.
-- Jika nama scope tidak bisa dipastikan dari kolom yang tersedia, VEBS memberi pesan bahwa scope tidak ditemukan; tidak diam-diam mengganti ke area lain.
-- Logika KPI yang ada tetap dipertahankan: bucket dari `dpd_old`, paid dari `payment_min_1x=Yes`, `loan_id` unik, dan restru dikecualikan.
-- Filter scope dari caption hanya berlaku untuk analisis lampiran Excel; perintah teks tanpa lampiran tetap dijawab oleh Gemini sesuai konteks.
-
-
-## Scope filtering v2.2.2
-- Column headers are normalized to recognize variants such as `Area Name`, `area_name`, `Branch Name`, and `branch_name`.
-- An explicit area/branch/point command can be placed in the Excel caption or sent as a separate text message immediately before the file in the same chat. The instruction expires after 30 minutes and is consumed by the next Excel attachment.
-- When a scope is explicitly requested but cannot be matched, VEBS returns an error instead of silently analyzing the entire file.
-- This change has passed JavaScript syntax validation; live WhatsApp/Railway and production Excel tests are still required.
-
-
-## Perbaikan v2.2.2 — filter scope ketat
-
-- Perintah area mencoba mencocokkan `area_name`, lalu nama area yang tertulis pada `branch_name`/`point_name`.
-- Caption umum tidak menghapus instruksi scope yang dikirim sebelumnya di chat yang sama.
-- Perhitungan KPI dilakukan setelah penyaringan scope.
-- Jika nama scope tidak ditemukan, VEBS mengirim pesan error dan tidak mengirim seluruh regional sebagai pengganti.
-- Tetap uji dengan file aktual sebelum dipakai untuk keputusan bisnis; pemeriksaan sintaks tidak menjamin seluruh variasi workbook sudah tercakup.
-
-
-## Revisi v2.2.3 — gaya respons WhatsApp
-Versi ini hanya merevisi system prompt untuk gaya komunikasi: lebih natural, santai, personal, ringkas, menyesuaikan chat pribadi/grup, dan jujur saat data tidak tersedia. Fungsi pemrosesan Excel, scope filter, perhitungan KPI, koneksi Baileys/WhatsApp, QR, endpoint, memori, retry/fallback, dan environment variables tidak sengaja diubah. Jika pengguna bertanya langsung tentang identitas sistem, VEBS harus menjawab jujur dan tidak mengaku sebagai manusia sungguhan.
+Ini paket untuk review; jangan deploy ke Railway production sebelum sheet mapping dan pengujian di atas diverifikasi.

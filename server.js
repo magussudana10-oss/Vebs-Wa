@@ -20,6 +20,8 @@ const GEMINI_MODEL = (process.env.GEMINI_MODEL || "gemini-3.8-flash").trim();
 const GEMINI_FALLBACK_MODEL = (process.env.GEMINI_FALLBACK_MODEL || "").trim();
 const QR_PAGE_TOKEN = process.env.QR_PAGE_TOKEN;
 const AUTH_DIR = process.env.AUTH_DIR || "/data/auth";
+const AMCOLL_WEBAPP_URL = (process.env.AMCOLL_WEBAPP_URL || "").trim();
+const AMCOLL_API_TOKEN = (process.env.AMCOLL_API_TOKEN || "").trim();
 // Memory is stored separately from WhatsApp credentials. Keep /data on a Railway Volume.
 const MEMORY_PATH = process.env.VEBS_MEMORY_PATH || "/data/vebs-memory.json";
 const MEMORY_ENABLED = String(process.env.VEBS_MEMORY_ENABLED || "true").toLowerCase() !== "false";
@@ -98,6 +100,8 @@ loadPersistentMemory();
 
 const messageQueue = new Map();
 const processedMessages = new Set();
+// Antrean global khusus Auto Collection agar laporan lintas chat diproses FIFO.
+let collectionQueue = Promise.resolve();
 // Scope commands sent as a separate text message can apply to the next Excel file in the same chat.
 const pendingScopeRequests = new Map();
 const SCOPE_REQUEST_TTL_MS = 30 * 60 * 1000;
@@ -135,6 +139,7 @@ app.get("/status", (_req, res) => {
     fallbackGeminiModels: getGeminiModels().filter(model => model !== GEMINI_MODEL),
     groupTrigger: "vebs (case-insensitive)",
     excelAnalysis: "xlsx/xls/csv attachment; scope follows requested area/branch when identifiable",
+    autoCollectionAmcoll: AMCOLL_WEBAPP_URL && AMCOLL_API_TOKEN ? "configured" : "not_configured",
     kpiTargets: { current: 0.98, dpd1_30: 0.55, dpd31_60: 0.15, dpd61_90: 0.07 },
     incomingUpsertEvents: incomingEventCount,
     acceptedMessages: acceptedMessageCount,
@@ -719,6 +724,125 @@ async function processExcelAttachment(message, jid, fileInfo, isGroup) {
   }
 }
 
+function normalizeCollectionIdentity(value) {
+  return String(value ?? "").normalize("NFKC").trim().replace(/\s+/g, " ").toLocaleLowerCase("id-ID");
+}
+
+function parseCollectionAmount(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return null;
+  // Format Indonesia: Rp150.000, 150.000, 150000, atau 150.000,50.
+  let cleaned = raw.replace(/rp\.?/gi, "").replace(/\s/g, "");
+  if (!/^[+-]?[\d.,]+$/.test(cleaned)) return null;
+  if (cleaned.includes(".") && cleaned.includes(",")) {
+    cleaned = cleaned.replace(/\./g, "").replace(",", ".");
+  } else if (cleaned.includes(",")) {
+    const parts = cleaned.split(",");
+    cleaned = parts.length === 2 && parts[1].length <= 2 ? `${parts[0].replace(/\./g, "")}.${parts[1]}` : cleaned.replace(/,/g, "");
+  } else if (/^\d{1,3}(\.\d{3})+$/.test(cleaned)) {
+    cleaned = cleaned.replace(/\./g, "");
+  }
+  const amount = Number(cleaned);
+  return Number.isFinite(amount) && amount > 0 ? amount : null;
+}
+
+function parseCollectionReport(text) {
+  const input = String(text || "");
+  const labels = {
+    customer_name: /(?:^|\n)\s*customer[_ ]name\s*:\s*(.*)\s*$/im,
+    customer_number: /(?:^|\n)\s*customer[_ ]number\s*:\s*(.*)\s*$/im,
+    loan_id: /(?:^|\n)\s*loan[_ ]id\s*:\s*(.*)\s*$/im,
+    nominal_bayar: /(?:^|\n)\s*nominal\s*bayar\s*:\s*(.*)\s*$/im
+  };
+  const found = Object.values(labels).some(regex => regex.test(input));
+  if (!found) return null;
+  const report = {};
+  for (const [key, regex] of Object.entries(labels)) report[key] = (input.match(regex)?.[1] || "").trim();
+  report.nominal_bayar_value = parseCollectionAmount(report.nominal_bayar);
+  report.isComplete = Boolean(report.customer_name && report.customer_number && report.loan_id && report.nominal_bayar && report.nominal_bayar_value !== null);
+  return report;
+}
+
+function formatRupiah(amount) {
+  return new Intl.NumberFormat("id-ID", { style: "currency", currency: "IDR", maximumFractionDigits: 0 }).format(amount);
+}
+
+async function submitCollectionReport(payload) {
+  if (!AMCOLL_WEBAPP_URL || !AMCOLL_API_TOKEN) {
+    return { ok: false, code: "NOT_CONFIGURED", message: "Integrasi spreadsheet Auto Collection belum dikonfigurasi. Laporan tidak direkap." };
+  }
+  const response = await fetch(AMCOLL_WEBAPP_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...payload, token: AMCOLL_API_TOKEN }),
+    signal: AbortSignal.timeout(35000)
+  });
+  const bodyText = await response.text();
+  let result;
+  try { result = JSON.parse(bodyText); } catch { throw new Error(`Respons AMCOLL bukan JSON (HTTP ${response.status}).`); }
+  if (!response.ok) throw new Error(`AMCOLL HTTP ${response.status}: ${result.message || "request gagal"}`);
+  return result;
+}
+
+function buildCollectionReply(senderName, report, result) {
+  const sender = senderName || "Pengirim WhatsApp";
+  const customer = report.customer_name || "(kosong)";
+  const loanId = report.loan_id || "(kosong)";
+  if (result.code === "DUPLICATE") {
+    return `⚠️ *LAPORAN PEMBAYARAN DUPLIKAT*\n\nPengirim: ${sender}\nLaporan pembayaran untuk customer *${customer}* dengan Loan ID *${loanId}* terdeteksi sudah pernah dilaporkan dengan nominal yang sama.\nLaporan ini tidak direkap kembali ke spreadsheet.\nSilakan cek laporan sebelumnya sebelum mengirim ulang.`;
+  }
+  if (result.code === "INVALID_IDENTITY") {
+    const mismatch = Array.isArray(result.mismatches) ? result.mismatches : [];
+    const details = mismatch.map(item => `• ${item.field}: ${item.message}`).join("\n");
+    return `❌ *LAPORAN PEMBAYARAN TIDAK VALID*\n\nPengirim: ${sender}\nCustomer: ${customer}\nLoan ID: ${loanId}\n\nBagian yang tidak cocok:\n${details || "Identitas tidak cocok dengan data Source."}\n\nLaporan tidak dimasukkan ke rekap. Silakan periksa dan kirim ulang setelah diperbaiki.`;
+  }
+  if (result.code === "AMBIGUOUS") {
+    return `⚠️ *LAPORAN BELUM DIREKAP*\n\nPengirim: ${sender}\nData customer *${customer}* dengan Loan ID *${loanId}* cocok dengan lebih dari satu baris Source.\nTidak ada data yang ditulis. Mohon periksa identitas laporan.`;
+  }
+  if (!result.ok) {
+    return `⚠️ *LAPORAN BELUM DIREKAP*\n\nPengirim: ${sender}\nCustomer: ${customer}\nLoan ID: ${loanId}\n\n${result.message || "Laporan belum dapat dicatat."}\nTidak ada konfirmasi berhasil karena penulisan belum terverifikasi.`;
+  }
+  return `✅ *LAPORAN PEMBAYARAN BERHASIL*\n\nPengirim: ${sender}\nCustomer: ${report.customer_name}\nCustomer Number: ${report.customer_number}\nLoan ID: ${report.loan_id}\nNominal Bayar: ${formatRupiah(report.nominal_bayar_value)}\nBaris Spreadsheet: ${result.row}\n\nLaporan pembayaran telah berhasil dicatat pada baris ${result.row} di sheet *Data Collection Amcoll*.\n\nTerima kasih, *${sender}*! 🙏\nTetap semangat dan terus berikan yang terbaik! 💪🔥\n\nSemoga pencapaiannya semakin meningkat dan target kita bersama bisa tercapai! 🚀`;
+}
+
+async function processCollectionReport(message, jid, sender, report) {
+  const messageId = message.key?.id || `${Date.now()}-${Math.random()}`;
+  const senderName = String(message.pushName || "").trim() || String(sender || "").split("@")[0] || "Pengirim WhatsApp";
+  const payload = {
+    customer_name: report.customer_name,
+    customer_number: report.customer_number,
+    loan_id: report.loan_id,
+    nominal_bayar: report.nominal_bayar_value,
+    sender_name: senderName,
+    whatsapp_message_id: `${jid}:${messageId}`,
+    received_at: new Date(Number(message.messageTimestamp || Math.floor(Date.now() / 1000)) * 1000).toISOString()
+  };
+  let result;
+  if (!report.isComplete) {
+    const missing = [];
+    if (!report.customer_name) missing.push("customer_name");
+    if (!report.customer_number) missing.push("customer_number");
+    if (!report.loan_id) missing.push("loan_id");
+    if (!report.nominal_bayar || report.nominal_bayar_value === null) missing.push("nominal bayar (harus lebih dari 0 dan format angka valid)");
+    result = { ok: false, code: "INVALID_IDENTITY", mismatches: missing.map(field => ({ field, message: "kosong atau format tidak valid" })) };
+  } else {
+    try {
+      result = await submitCollectionReport(payload);
+    } catch (error) {
+      console.error("[AMCOLL] Submit gagal:", error?.message || String(error));
+      result = { ok: false, code: "ERROR", message: "Terjadi kendala saat menghubungi spreadsheet. Laporan tidak boleh dianggap berhasil; silakan coba lagi nanti." };
+    }
+  }
+  await sendText(jid, buildCollectionReply(senderName, report, result));
+  console.log(`[AMCOLL] report handled code=${result.code || (result.ok ? "OK" : "ERROR")} messageId=${Boolean(messageId)}`);
+}
+
+function enqueueCollectionReport(message, jid, sender, report) {
+  const current = collectionQueue.catch(() => {}).then(() => processCollectionReport(message, jid, sender, report));
+  collectionQueue = current.catch(error => console.error("[AMCOLL] Queue error:", error?.message || String(error)));
+  return current;
+}
+
 async function handleMessage(message) {
   if (!message?.message || message.key?.fromMe) return;
   const jid = message.key?.remoteJid;
@@ -733,6 +857,18 @@ async function handleMessage(message) {
 
   // Log ini harus terlihat saat ada pesan baru; tidak mencetak isi pesan atau nomor anggota.
   console.log(`[WA IN] type=${isGroup ? "GROUP" : "PRIVATE"} hasText=${Boolean(text)} hasExcel=${Boolean(excelDocument)} trigger=${isGroup && text ? GROUP_TRIGGER_REGEX.test(text) : false} messageId=${Boolean(id)}`);
+
+  // Format laporan AMCOLL diproses di chat pribadi maupun grup tanpa wajib menyebut VEBS.
+  const collectionReport = text ? parseCollectionReport(text) : null;
+  if (collectionReport) {
+    const collectionDedupeKey = `${jid}:${id || `${Date.now()}-amcoll`}`;
+    if (processedMessages.has(collectionDedupeKey)) return;
+    processedMessages.add(collectionDedupeKey);
+    if (processedMessages.size > MAX_PROCESSED_IDS) processedMessages.delete(processedMessages.values().next().value);
+    acceptedMessageCount++;
+    await enqueueCollectionReport(message, jid, sender, collectionReport);
+    return;
+  }
 
   if (excelDocument) {
     // Di grup, caption harus menyebut VEBS agar file tidak dianalisis tanpa diminta.
