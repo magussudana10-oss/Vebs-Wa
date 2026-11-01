@@ -47,5 +47,5 @@ Pertahankan nilai existing. Jangan menimpa `MAGUS_OWNER_JID`, `AUTH_DIR`, `VEBS_
 - Fitur dokumen: PDF, DOCX, PPTX, TXT, CSV dan Excel mengikuti parser/batas yang tercantum di kode.
 
 ## Status validasi
-Pemeriksaan sintaks `node --check server.js` dan validitas JSON `package.json` telah dila
+Deployment trigger: VEBS v2.5.0
 Deployment trigger: VEBS v2.5.0kukan. Pengujian integrasi WhatsApp/Baileys, Gemini, FFmpeg di Railway, serta media real belum dijalankan pada environment produksi. Lakukan test plan di environment uji sebelum deploy.
