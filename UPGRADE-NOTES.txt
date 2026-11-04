@@ -1,0 +1,13 @@
+VEBS — ADDITIVE WHATSAPP SENDER IDENTITY UPGRADE
+Baseline source: server(20261104-095921).js supplied by user.
+
+DEPLOY ROOT FILES:
+- server.js
+- package.json
+- Code.gs (reference copy; not needed by Railway deploy)
+- .env.example (reference only; do not rename to .env or upload secrets)
+- documentation files
+
+Only server.js contains the code change. package.json and Code.gs are copied unchanged from the supplied files.
+For Railway, replace only root server.js in GitHub and commit once. Do not delete package-lock.json unless intentionally regenerating it; keep existing production variables and /data volume.
+Do not upload the ROLLBACK-BACKUP folder as app source. It is included only as a local rollback reference.
